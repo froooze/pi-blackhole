@@ -256,6 +256,16 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
       }
 
+      // Issue #92: scheduled auto-compactions skipped because the extension ctx
+      // went stale before the deferred compaction ran (in-memory subagent/flow
+      // sessions disposed right after agent_end). Process-wide counter.
+      if ((runtime.staleCtxSkippedCompactions ?? 0) > 0) {
+        lines.push(
+          "",
+          `Skipped compactions (disposed ctx): ${runtime.staleCtxSkippedCompactions.toLocaleString()}`,
+        );
+      }
+
       if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError) {
         lines.push("", "── Last error ──");
         if (runtime.lastObserverError) lines.push(`Observer: ${runtime.lastObserverError}`);

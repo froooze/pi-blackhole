@@ -28,7 +28,7 @@ jobs:
       - run: pnpm format:check
 
   compat-min-supported:
-    name: Compat - pi 0.81.1 (min supported)
+    name: Compat - min supported (peer floor)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,7 +39,14 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Re-pin pi packages to minimum supported version
-        run: pnpm add -D @earendil-works/pi-agent-core@0.81.1 @earendil-works/pi-ai@0.81.1 @earendil-works/pi-coding-agent@0.81.1 @earendil-works/pi-tui@0.81.1 --save-exact
+        # Floor is read from package.json peerDependencies (single source of
+        # truth) — it only moves when new Pi APIs are adopted, never weekly.
+        run: |
+          for pkg in pi-agent-core pi-ai pi-coding-agent pi-tui; do
+            FLOOR=$(node -p "require('./package.json').peerDependencies['@earendil-works/${pkg}'].match(/>=([^ ]+)/)[1]")
+            echo "compat floor for @earendil-works/${pkg}: ${FLOOR}"
+            pnpm add -D "@earendil-works/${pkg}@${FLOOR}" --save-exact
+          done
       - run: pnpm typecheck
       - run: pnpm test
 

@@ -26,7 +26,7 @@ export default async (pi: ExtensionAPI) => {
   // Resolve the host's AgentSession identity before this factory returns. Local
   // package development can otherwise patch a duplicate devDependency module.
   // The adapter is reload-idempotent and fails closed on unknown Pi internals.
-  await installHostInlineCompactionAdapter();
+  const inlineCompactionAdapterStatus = await installHostInlineCompactionAdapter();
   // ── Bridge: capture custom provider stream functions for jiti-loaded agents ──
   // pi-blackhole's consolidation agents are loaded via jiti with moduleCache: false,
   // which creates a separate pi-ai instance whose apiProviderRegistry lacks custom
@@ -47,16 +47,30 @@ export default async (pi: ExtensionAPI) => {
   // 0.5.2 migration notice: nudge pinned-threshold users toward the
   // context-window preset curve (see src/changelog/migration-notice.ts).
   // TODO(0.5.3): remove together with the module + tests.
+  //
+  // The dynamic import defers this work to a later tick, by which time the
+  // session may already be gone (quit, /reload, /new right after startup).
+  // Pi's ctx accessors throw on a stale ctx, so the `.then()` body must be
+  // both guarded and catch-terminated — otherwise the throw escapes as an
+  // *unhandled rejection* and terminates the pi process.
   pi.on("session_start", (_event: unknown, ctx: any) => {
-    void import("./src/changelog/migration-notice.js").then(({ maybeNotifyThresholdMigration }) => {
-      omRuntime.ensureConfig(ctx.cwd, (msg: string) => ctx.ui?.notify?.(msg, "warning"));
-      maybeNotifyThresholdMigration(ctx, omRuntime.config);
-    });
+    void import("./src/changelog/migration-notice.js")
+      .then(({ maybeNotifyThresholdMigration }) => {
+        omRuntime.ensureConfig(ctx.cwd, (msg: string) => ctx.ui?.notify?.(msg, "warning"));
+        maybeNotifyThresholdMigration(ctx, omRuntime.config);
+      })
+      .catch(() => {
+        // Session replaced/disposed while the notice module was loading, or the
+        // config read failed. A migration nudge is best-effort — never fatal.
+      });
   });
 
   scaffoldSettings();
 
   const omRuntime = new Runtime();
+  // Carry the startup probe result into the runtime so triggers can explain an
+  // unsupported host instead of silently falling back every run.
+  omRuntime.inlineCompactionAdapterStatus = inlineCompactionAdapterStatus;
 
   // Observational memory: background consolidation pipeline
   registerConsolidationTrigger(pi, omRuntime); // agent_start + turn_end → observer/reflector/dropper

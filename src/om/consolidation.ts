@@ -13,7 +13,13 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ConfiguredModel } from "./config.js";
 import { debugLog, withDebugLogContext } from "./debug-log.js";
 import { type ResolveResult, type Runtime, type RuntimeGeneration } from "./runtime.js";
-import { isRetryableError, isStaleExtensionContextError } from "./retryable-error.js";
+import { withProviderAttributionHeaders } from "./provider-stream.js";
+import {
+  isCooldownWorthyError,
+  isDeterministicError,
+  isRetryableError,
+  isStaleExtensionContextError,
+} from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
 
@@ -636,7 +642,7 @@ export async function runConsolidationPipeline(
 
 // ── Observer stage (with fallback) ──────────────────────────────────────────
 
-async function runObserverStage(
+export async function runObserverStage(
   pi: ExtensionAPI,
   runtime: Runtime,
   ctx: ConsolidationCtx,
@@ -657,23 +663,32 @@ async function runObserverStage(
     throw error;
   }
 
-  // Determine start index: cursor takes priority, fall back to coverage markers
+  // Determine start index: cursor takes priority. A cursor whose entry left the
+  // branch (fork, navigation, compaction during the session) falls back to the
+  // same marker/compaction rule as an absent cursor, so a pruned pre-compaction
+  // anchor never forces a full-history re-observation.
   const observerCursor = runtime.getCursor("observer");
+  const observerFallbackStart = (): number => {
+    const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+    return lastCoverageIdx >= 0 ? lastCoverageIdx : findLastCompactionIndex(entries);
+  };
   let effectiveStart: number;
   if (observerCursor) {
     const cursorIdx = entryIndexForId(entries, observerCursor.entryId);
-    effectiveStart =
-      cursorIdx >= 0 ? cursorIdx : latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+    effectiveStart = cursorIdx >= 0 ? cursorIdx : observerFallbackStart();
   } else {
-    const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-    effectiveStart = lastCoverageIdx >= 0 ? lastCoverageIdx : findLastCompactionIndex(entries);
+    effectiveStart = observerFallbackStart();
   }
 
-  const tokens = effectiveStart >= 0 ? rawTokensAfterIndex(entries, effectiveStart) : 0;
+  // Anchor -1 (no cursor, no marker, no compaction) measures the full history:
+  // rawTokensAfterIndex clamps -1 to index 0 (issue #87).
+  const tokens = rawTokensAfterIndex(entries, effectiveStart);
   if (tokens < runtime.config.observeAfterTokens) {
-    // Not due — advance cursor to last source entry so we don't re-check immediately
-    const lastSourceId = [...entries].reverse().find((e: Entry) => isSourceEntry(e))?.id;
-    if (lastSourceId) runtime.advanceCursor("observer", lastSourceId, "not_due");
+    // Not due. Keep the anchor at the measured coverage point rather than the
+    // newest entry: below-threshold content is still unobserved, so moving the
+    // cursor past it would drop it permanently instead of letting it accumulate.
+    const anchorId = effectiveStart >= 0 ? entries[effectiveStart]?.id : undefined;
+    if (anchorId) runtime.advanceCursor("observer", anchorId, "not_due");
     return "continue";
   }
 
@@ -805,7 +820,7 @@ async function runObserverStage(
       const result = await runObserver({
         model: resolved.model as any,
         apiKey: resolved.apiKey,
-        headers: resolved.headers,
+        headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
         env: resolved.env,
         priorReflections,
         priorObservations,
@@ -817,6 +832,7 @@ async function runObserverStage(
         providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
         signal: generation.signal,
         modelRegistry: ctx.modelRegistry,
+        sessionId,
       });
       if (!runtime.isGenerationActive(generation)) return "abort";
 
@@ -892,6 +908,9 @@ async function runObserverStage(
       }
       // Always try next fallback — don't abort pipeline for a single model failure.
       // Record cooldown so resolveModel skips this model in the next iteration.
+      // Deterministic 4xx (e.g. MissingSessionID) additionally cools the
+      // resolved model itself: the session model has no candidate config, so
+      // without this it would retry identically on every cycle.
       const candidateConfig = runtime.findCandidateConfig(resolved.model, {
         model: ctx.model,
         modelRegistry: ctx.modelRegistry,
@@ -901,9 +920,12 @@ async function runObserverStage(
         stageFallbacks: stageFallbackModels(runtime, "observer"),
       });
       runtime.recordRetryableError(candidateConfig, error, "observer");
+      if (!candidateConfig) runtime.recordDeterministicError(resolved.model, error, "observer");
       debugLog("observer.error", {
         error: String(error),
         retryable: isRetryableError(error),
+        deterministic: isDeterministicError(error),
+        cooldownWorthy: isCooldownWorthyError(error),
       });
       // Continue loop — resolveModel will skip the cooled-down model
       continue;
@@ -1097,7 +1119,7 @@ async function runReflectorStage(
       const reflections = await runReflector({
         model: resolved.model as any,
         apiKey: resolved.apiKey,
-        headers: resolved.headers,
+        headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
         env: resolved.env,
         reflections: newReflections,
         observations: newObservations,
@@ -1108,6 +1130,7 @@ async function runReflectorStage(
         providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
         signal: generation.signal,
         modelRegistry: ctx.modelRegistry,
+        sessionId,
       });
       if (!runtime.isGenerationActive(generation))
         return { outcome: "abort", sameRunReflections: [] };
@@ -1160,9 +1183,12 @@ async function runReflectorStage(
         stageFallbacks: stageFallbackModels(runtime, "reflector"),
       });
       runtime.recordRetryableError(candidateConfig, error, "reflector");
+      if (!candidateConfig) runtime.recordDeterministicError(resolved.model, error, "reflector");
       debugLog("reflector.error", {
         error: String(error),
         retryable: isRetryableError(error),
+        deterministic: isDeterministicError(error),
+        cooldownWorthy: isCooldownWorthyError(error),
       });
       continue;
     }
@@ -1346,7 +1372,7 @@ async function runDropperStage(
       const droppedIds = await runDropper({
         model: resolved.model as any,
         apiKey: resolved.apiKey,
-        headers: resolved.headers,
+        headers: withProviderAttributionHeaders(resolved.model as any, resolved.headers, sessionId),
         env: resolved.env,
         reflections: reflectionsForDropper,
         observations: newObservations,
@@ -1358,6 +1384,7 @@ async function runDropperStage(
         providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
         signal: generation.signal,
         modelRegistry: ctx.modelRegistry,
+        sessionId,
       });
       if (!runtime.isGenerationActive(generation)) return "abort";
       const latestReflectionCoverageId = isManualMode(runtime.config)
@@ -1404,9 +1431,12 @@ async function runDropperStage(
         stageFallbacks: stageFallbackModels(runtime, "dropper"),
       });
       runtime.recordRetryableError(candidateConfig, error, "dropper");
+      if (!candidateConfig) runtime.recordDeterministicError(resolved.model, error, "dropper");
       debugLog("dropper.error", {
         error: String(error),
         retryable: isRetryableError(error),
+        deterministic: isDeterministicError(error),
+        cooldownWorthy: isCooldownWorthyError(error),
       });
       continue;
     }

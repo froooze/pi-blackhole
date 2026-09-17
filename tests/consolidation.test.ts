@@ -1,6 +1,36 @@
-import { describe, test, expect } from "vitest";
+import { afterEach, beforeEach, describe, test, expect, vi } from "vitest";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Runtime } from "../src/om/runtime.js";
-import { makeModelResolver, type ConsolidationCtx } from "../src/om/consolidation.js";
+import {
+  makeModelResolver,
+  runConsolidationPipeline,
+  type ConsolidationCtx,
+} from "../src/om/consolidation.js";
+import { compactionEntry, rawMessage, type TestEntry } from "./fixtures/session.js";
+import { createExtensionApiDouble } from "./fixtures/pi-extension-api.js";
+
+/** Cursor round trips write real pending files, so redirect the agent dir. */
+const cursorTestDir = join(tmpdir(), `pi-blackhole-consolidation-cursors-${Date.now()}`);
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return { ...actual, getAgentDir: () => cursorTestDir };
+});
+
+interface ObserverAgentInput {
+  chunk: string;
+  allowedSourceEntryIds: string[];
+}
+
+const agents = vi.hoisted(() => ({
+  runObserver: vi.fn<(input: ObserverAgentInput) => Promise<unknown>>(),
+  runReflector: vi.fn(),
+  runDropper: vi.fn(),
+}));
+vi.mock("../src/om/agents/observer/agent.js", () => ({ runObserver: agents.runObserver }));
+vi.mock("../src/om/agents/reflector/agent.js", () => ({ runReflector: agents.runReflector }));
+vi.mock("../src/om/agents/dropper/agent.js", () => ({ runDropper: agents.runDropper }));
 
 function mockCtx(notifyCalls: Array<{ message: string; level?: string }>): ConsolidationCtx {
   return {
@@ -798,5 +828,198 @@ describe("observer zero-chunk backoff", () => {
 
     // Observer should NOT be due — rawTokensAfterIndex from cursor = 0 tokens
     expect(anyStageDue(entries, runtime, undefined)).toBe(false);
+  });
+});
+
+// ── Repeated pipeline cycles over append-only source entries ────────────────
+
+interface PipelineFixture {
+  runtime: Runtime;
+  entries: TestEntry[];
+  run(): Promise<void>;
+}
+
+/**
+ * Full `runConsolidationPipeline` fixture with stubbed workers and model
+ * resolution. Only the observer is configured below threshold, so each cycle
+ * exercises real cursor resolution, coverage measurement and cursor advance
+ * without reflect/drop work.
+ */
+function makePipelineFixture(options: {
+  observeAfterTokens: number;
+  runtime?: Runtime;
+  entries?: TestEntry[];
+}): PipelineFixture {
+  const runtime = options.runtime ?? new Runtime();
+  runtime.configLoaded = true;
+  runtime.config.memory = true;
+  runtime.config.observeAfterTokens = options.observeAfterTokens;
+  runtime.config.reflectAfterTokens = 1_000_000;
+  runtime.resolveModel = async () => ({
+    ok: true as const,
+    model: { provider: "test", id: "model", contextWindow: 1_000_000 },
+    apiKey: "test",
+  });
+  const entries = options.entries ?? [];
+  const pi = createExtensionApiDouble({
+    appendEntry: (customType, data) => {
+      entries.push({
+        type: "custom",
+        id: `appended-${entries.length}`,
+        parentId: entries.at(-1)?.id ?? null,
+        timestamp: "2026-05-02T10:00:00.000Z",
+        customType,
+        data,
+      });
+    },
+  });
+  const ctx = {
+    cwd: "/tmp",
+    hasUI: false,
+    model: undefined,
+    modelRegistry: {},
+    sessionManager: { getBranch: () => entries, getSessionId: () => "cursor-session" },
+  };
+  return {
+    runtime,
+    entries,
+    run: async () => {
+      await runConsolidationPipeline(pi, runtime, ctx, runtime.captureGeneration("cursor-session"));
+    },
+  };
+}
+
+/** One pipeline observer call input, failing loudly when the call never happened. */
+function observerChunkArg(callIndex = 0): ObserverAgentInput {
+  const call = agents.runObserver.mock.calls[callIndex];
+  if (!call) {
+    throw new Error(`observer ran ${agents.runObserver.mock.calls.length} time(s)`);
+  }
+  return call[0];
+}
+
+const smallSource = (id: string) => rawMessage(id, `SMALL-${id} ${"x".repeat(120)}`);
+
+beforeEach(() => {
+  agents.runObserver.mockReset();
+  agents.runObserver.mockResolvedValue({
+    observations: [],
+    emptyReason: { kind: "no_new_content" as const },
+  });
+  agents.runReflector.mockReset();
+  agents.runDropper.mockReset();
+});
+
+afterEach(() => {
+  rmSync(cursorTestDir, { recursive: true, force: true });
+});
+
+describe("repeated consolidation pipeline cycles", () => {
+  test("never observes below threshold, then covers every accumulated source entry", async () => {
+    const fixture = makePipelineFixture({ observeAfterTokens: 5_000 });
+
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      fixture.entries.push(smallSource(`small-${cycle}`));
+      await fixture.run();
+      expect(agents.runObserver).not.toHaveBeenCalled();
+      // Nothing measured yet: no cursor may claim the small additions as done.
+      expect(fixture.runtime.getCursor("observer")).toBeUndefined();
+    }
+
+    const lowTokens = fixture.entries.map((entry) => entry.id);
+    fixture.entries.push(rawMessage("big-1", `BIG-1 ${"y".repeat(40_000)}`));
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    const input = observerChunkArg();
+    // The earliest small addition is still observed once the threshold is crossed.
+    expect(input.chunk).toContain("SMALL-small-0");
+    expect(input.chunk).toContain("BIG-1");
+    expect(input.allowedSourceEntryIds).toEqual([...lowTokens, "big-1"]);
+    // Empty outcome: coverage advances to the last measured source entry.
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "empty" });
+  });
+
+  test("a not-due cycle keeps later small additions pending for the next due cycle", async () => {
+    const fixture = makePipelineFixture({ observeAfterTokens: 5_000 });
+    fixture.entries.push(rawMessage("big-1", `BIG-1 ${"y".repeat(40_000)}`));
+    await fixture.run();
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "empty" });
+
+    // Below threshold again: the not-due branch anchors on measured coverage only.
+    fixture.entries.push(smallSource("pending"));
+    await fixture.run();
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "not_due" });
+
+    fixture.entries.push(rawMessage("big-2", `BIG-2 ${"z".repeat(40_000)}`));
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledTimes(2);
+    const input = observerChunkArg(1);
+    // The small addition skipped by the not-due cycle is observed, not dropped.
+    expect(input.chunk).toContain("SMALL-pending");
+    expect(input.chunk).toContain("BIG-2");
+    expect(input.allowedSourceEntryIds).toEqual(["pending", "big-2"]);
+  });
+
+  test("records coverage from a recorded outcome and does not re-observe it", async () => {
+    const fixture = makePipelineFixture({ observeAfterTokens: 5_000 });
+    agents.runObserver.mockResolvedValue({
+      observations: [
+        {
+          id: "aaaaaaaaaaaa",
+          content: "Coverage for the first measured chunk",
+          timestamp: "2026-05-02T10:00:00.000Z",
+          relevance: "medium",
+          sourceEntryIds: ["big-1"],
+          supportingObservationIds: ["aaaaaaaaaaaa"],
+          tokenCount: 6,
+        },
+      ],
+    });
+    fixture.entries.push(rawMessage("big-1", `BIG-1 ${"y".repeat(40_000)}`));
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
+    const recorded = fixture.entries.filter(
+      (entry) => entry.customType === "om.observations.recorded",
+    );
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.data).toMatchObject({ coversUpToId: "big-1" });
+
+    await fixture.run();
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+  });
+
+  test("a restored not-due cursor still owns its unobserved backlog", async () => {
+    const entries: TestEntry[] = [
+      compactionEntry("c0", { firstKeptEntryId: "m1", summary: "prior work" }),
+      smallSource("m1"),
+    ];
+    const first = makePipelineFixture({ observeAfterTokens: 5_000, entries });
+    await first.run();
+
+    expect(agents.runObserver).not.toHaveBeenCalled();
+    // The compaction anchor keeps the below-threshold addition pending.
+    expect(first.runtime.getCursor("observer")).toEqual({ entryId: "c0", state: "not_due" });
+    first.runtime.saveCursorsToPending("cursor-session");
+
+    // A fresh runtime restores the persisted cursor before the next cycle.
+    const restored = makePipelineFixture({ observeAfterTokens: 5_000, entries });
+    restored.runtime.loadCursorsFromPending("cursor-session");
+    expect(restored.runtime.getCursor("observer")).toEqual({ entryId: "c0", state: "not_due" });
+
+    entries.push(rawMessage("big-1", `BIG-1 ${"y".repeat(40_000)}`));
+    await restored.run();
+
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+    const input = observerChunkArg();
+    expect(input.chunk).toContain("SMALL-m1");
+    expect(input.chunk).toContain("BIG-1");
+    expect(input.allowedSourceEntryIds).toEqual(["m1", "big-1"]);
+    expect(restored.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "empty" });
   });
 });

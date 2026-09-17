@@ -46,8 +46,8 @@ function notifySafely(
 }
 
 export function registerCompactFailedHook(pi: ExtensionAPI, runtime: Runtime): void {
-  // `session_compact_failed` ships in pi >= 0.84.3; our dev-time types pin an
-  // older version, so register through a widened signature. On older pi the
+  // `session_compact_failed` ships in pi >= 0.84.3 (our minimum supported
+  // version), so register through a widened signature. On older pi the
   // event never fires and this handler stays dormant.
   const onAny = pi.on as unknown as (
     event: string,

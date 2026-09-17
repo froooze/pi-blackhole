@@ -62,6 +62,8 @@ function createMockEnvironment() {
     lastObserverError: undefined,
     lastReflectorError: undefined,
     lastDropperError: undefined,
+    staleCtxSkippedCompactions: 0,
+    staleCtxWarnedSessions: new Set<string>(),
   };
 
   const ui = {
@@ -127,6 +129,43 @@ function createMockEnvironment() {
 }
 
 describe("/blackhole-memory command", () => {
+  it("status omits the stale-ctx skip line when the counter is zero", async () => {
+    const { pi, runtime, handlerMap, buildBranch } = createMockEnvironment();
+    registerMemoryCommand(pi as any, runtime as any);
+
+    const ui = { notify: vi.fn() };
+    await handlerMap.get("blackhole-memory")!([], {
+      cwd: "/tmp/test",
+      sessionManager: {
+        getBranch: vi.fn(() => buildBranch()),
+        getSessionId: vi.fn(() => "test-session"),
+      },
+      ui,
+    });
+
+    const msg = (ui.notify as any).mock.calls[0][0] as string;
+    expect(msg).not.toContain("Skipped compactions");
+  });
+
+  it("status shows the stale-ctx skip counter only when nonzero (issue #92)", async () => {
+    const { pi, runtime, handlerMap, buildBranch } = createMockEnvironment();
+    registerMemoryCommand(pi as any, runtime as any);
+    runtime.staleCtxSkippedCompactions = 3;
+
+    const ui = { notify: vi.fn() };
+    await handlerMap.get("blackhole-memory")!([], {
+      cwd: "/tmp/test",
+      sessionManager: {
+        getBranch: vi.fn(() => buildBranch()),
+        getSessionId: vi.fn(() => "test-session"),
+      },
+      ui,
+    });
+
+    const msg = (ui.notify as any).mock.calls[0][0] as string;
+    expect(msg).toContain("Skipped compactions (disposed ctx): 3");
+  });
+
   it("registers the command on pi", () => {
     const { pi, runtime } = createMockEnvironment();
     registerMemoryCommand(pi as any, runtime as any);

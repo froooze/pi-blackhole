@@ -2,6 +2,36 @@
 
 ---
 
+## [0.5.5] - 2026-09-15
+
+### Changed
+
+- **Minimum supported Pi raised to 0.84.3.** The `compat-min-supported` CI job now derives its pin from the `peerDependencies` floor instead of a hardcoded version, so the floor only moves when new Pi APIs are adopted. Fail-closed behavior on older hosts is unchanged.
+
+### Fixed
+
+- **OM workers now send provider-required session headers (OpenCode Go `MissingSessionID`).** Observer/reflector/dropper calls bypass Pi's interactive header pipeline (`mergeProviderAttributionHeaders` + `before_provider_headers` in `sdk.ts`) by invoking `streamSimple` directly, so the OpenCode Go gateway rejected every worker request with `400 MissingSessionID` while Pi's own calls worked. Attribution now happens at a single choke point (`withProviderAttributionHeaders`, pi-core `getSessionHeaders` mirror with exact-hostname matching): the Pi session id travels through standard stream options (`sessionId`) and is materialized both as pre-merged `headers` and as a composed `transformHeaders` (honored by pi-ai `applyAuth` after the auth merge), covering builtin, custom-registered, and future providers without per-stage branching. Reworks PR #95 with the contributor's regression assertions kept verbatim. ([#93](https://github.com/k0valik/pi-blackhole/issues/93))
+- **Deterministic 4xx errors now cool models down and engage fallbacks.** A 400-class failure (missing provider-required headers, bad credentials, unknown model) previously retried the same broken session model on every consolidation cycle: `recordRetryableError` is a no-op without a candidate config, and `isRetryableError` gated nothing (debug logging only) — so a deterministic 4xx like `MissingSessionID` never cooled the resolved session model at all. New `isDeterministicError` / `isCooldownWorthyError` classification; deterministic failures persist cooldown (default 1h) including for the resolved session model, so the stage falls through to `*FallbackModels` instead of burning attempts. Transient blips on the main model still only trip the 30s retry gate, never an hour-long cooldown.
+- **Surface silently skipped stale-ctx auto-compactions ([#92](https://github.com/k0valik/pi-blackhole/issues/92)).** In-memory subagent/flow sessions are disposed by their parent right after `agent_end`, so the deferred auto-compaction microtask always bails on a stale extension ctx — previously invisible outside `debug.ndjson`, leaving large headless sessions unbounded with no signal. Each skipped compaction is now counted (`Skipped compactions (disposed ctx)` in `/blackhole-memory` status, process-wide so a parent surfaces nested-session skips) and warned once per session (UI notification; stderr for headless runs). Bail behavior itself is unchanged.
+- **Reliable mid-run host discovery and recovery.** ([#98](https://github.com/k0valik/pi-blackhole/pull/98), thanks @sonSunnoi) On Pi's unbundled layout (`dist/cli.js` importing `dist/main.js`) a resolved bundled chunk no longer counts as host discovery on its own — each package root now falls back to its `dist/index.js` barrel, so inline (mid-run) compaction works instead of silently staying unavailable. Each discovered host also binds its own `prepareCompaction` helper, so a session never borrows another installed host's helper for eligibility checks. Plus: below-threshold observer content now accumulates instead of being dropped by the not-due cursor advance, stale cursors fall back to the coverage/compaction rule, and the startup adapter probe is carried into the runtime so `resume` mode warns once instead of silently falling back. Closes [#96](https://github.com/k0valik/pi-blackhole/issues/96).
+- **Test host doubles without type escapes, and lint-staged tolerates ignored paths.** ([#99](https://github.com/k0valik/pi-blackhole/pull/99), thanks @sonSunnoi) The compaction host test double is now a complete typed `ExtensionAPI` implementation (compile-time contract test included); production code unchanged. Also fixes `lint-staged` failing docs-only commits (`oxfmt --check` on ignored `docs/` paths). Closes [#97](https://github.com/k0valik/pi-blackhole/issues/97).
+- **Quitting right after startup no longer kills Pi.** ([#91](https://github.com/k0valik/pi-blackhole/pull/91), thanks @priaculun) The `session_start` migration notice runs behind a dynamic `import()`, so a quit, `/reload`, or `/new` in that window threw on the stale ctx — with no `.catch()`, the throw escaped as an unhandled rejection and terminated the process. The notice is now catch-terminated (best-effort, never fatal).
+
+---
+
+## [0.5.4] - 2026-09-13
+
+### Fixed
+
+- **Skip ineligible proactive auto-compaction before core `prepareCompaction` failure.** When provider context reaches the auto-compaction threshold (e.g. via large system prompts, tool definitions, or memory projections) but available session entries after the latest boundary remain below Pi's configured `keepRecentTokens` budget (default 20,000), `prepareCompaction()` returns `undefined`, which previously caused Pi's `AgentSession.compact()` to throw `"Nothing to compact (session too small)"` before extension hooks ran. Settled (`agent_end`) and mid-run (`turn_end` in resume and pause modes) auto-compaction now evaluate session eligibility using Pi's `prepareCompaction` and the captured `AgentSession`'s effective compaction settings, suppressing premature trigger notices, inline failure backoff loops, and unhandled compaction errors while cleanly resuming once session history grows past the keep budget.
+- **Observer now records on sessions that have never compacted.** The observer stage's progress anchor (cursor → observation coverage marker → last compaction entry) zeroed its accumulated-token count when all three were absent — every fresh session, fork, or subagent below the compaction threshold measured 0 tokens and stayed `not_due` forever, while the status line (`anyStageDue`) correctly counted the full history and kept reporting the observer as due. The anchor now falls through to the full-history measurement (`rawTokensAfterIndex` already clamps an index of -1 to index 0), so the observer fires once `observeAfterTokens` accumulate even with no compaction entry in the branch. Sessions with any anchor (compacted, marker-bearing, cursor-bearing) behave identically. Regression from the v0.3.8 cursor work (#28/#29); behavior matches what the trigger path already did. ([#87](https://github.com/k0valik/pi-blackhole/issues/87))
+
+### Dependencies
+
+- Bumped the dev-dependencies group with 9 updates ([#88](https://github.com/k0valik/pi-blackhole/pull/88)). Dependabot now applies a cooldown (2 days default, 7 days for semver-major) so it only opens PRs carrying packages past the 48h `minimumReleaseAge` maturity gate instead of producing lockfiles `pnpm install` rejects.
+
+---
+
 ## [0.5.3] - 2026-09-10
 
 ### Fixed

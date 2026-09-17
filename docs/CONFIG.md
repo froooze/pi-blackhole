@@ -180,6 +180,8 @@ Only applies when `compaction: "auto"` and `compactionEngine: "blackhole"`.
 
 `"pause"` is intentionally different: it calls public `ctx.compact()`, which aborts the active run by design. That abort may propagate to extensions which treat the run signal as user cancellation, so use `"resume"` for transparent/subagent workflows.
 
+**Headless sessions (subagents, flow runners).** In-memory sessions (`SessionManager.inMemory()`) are typically disposed by their parent right after `agent_end`, so the deferred `agent_end` compaction reliably loses that race and bails on a stale extension ctx — under `"off"` such sessions are effectively never compacted ([#92](https://github.com/k0valik/pi-blackhole/issues/92)). Every skipped compaction is counted and surfaced: the `/blackhole-memory` status shows `Skipped compactions (disposed ctx): N`, and each affected session warns once (UI notification, or stderr for headless runs).
+
 **Re-trigger safety:** after a successful compaction, accumulated tokens are counted from the fresh compaction entry. Failed or cancelled attempts are suspended until pressure drops below the threshold.
 
 ```jsonc
@@ -510,7 +512,7 @@ Each model config supports the following fields:
 | `provider` | string | Provider name (required). |
 | `id` | string | Model ID (required). |
 | `thinking` | enum | Thinking level: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Defaults to `"low"` when unset. |
-| `cooldownHours` | number | Cooldown duration in hours after a retryable error (429/5xx/timeout). Defaults to `1` when omitted. Set to `0` to disable persistent cooldown. |
+| `cooldownHours` | number | Cooldown duration in hours after a cooldown-worthy error — transient (429/5xx/timeout) or deterministic 4xx (missing provider-required headers, bad credentials, unknown model). Defaults to `1` when omitted. Set to `0` to disable persistent cooldown. |
 | `contextWindow` | number | Override for the model's context window. Inherits from Pi's model registry when unset. |
 
 **Example:**

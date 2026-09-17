@@ -13,3 +13,11 @@ updates:
     # and an unattended bump breaks `pnpm lint` (see AGENTS.md).
     ignore:
       - dependency-name: "typescript"
+    # Match the local 48h pnpm minimumReleaseAge maturity gate (see ci-pkg
+    # skill): dependabot must not open PRs carrying packages younger than
+    # 48h, or `pnpm install` fails ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION
+    # until they age out (issue: dependabot group bump #88). Merge happens
+    # after PR creation, so 48h at PR time is a safe floor.
+    cooldown:
+      default-days: 2
+      semver-major-days: 7
