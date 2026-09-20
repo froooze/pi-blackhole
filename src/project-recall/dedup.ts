@@ -505,8 +505,8 @@ export function normalizeContent(content: string): string {
 function levenshteinSimilarity(a: string, b: string): number {
   if (a === b) return 1;
   if (!a.length || !b.length) return 0;
-  let prev = new Array<number>(b.length + 1);
-  let cur = new Array<number>(b.length + 1);
+  let prev: number[] = Array.from({ length: b.length + 1 });
+  let cur: number[] = Array.from({ length: b.length + 1 });
   for (let j = 0; j <= b.length; j++) prev[j] = j;
   for (let i = 1; i <= a.length; i++) {
     cur[0] = i;

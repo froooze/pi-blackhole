@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Pi extension package: algorithmic compaction (pi-vcc) + observational memory (pi-observational-memory), merged and heavily diverged. See README.md (features), docs/CONFIG.md (config reference), CHANGELOG.md (root, release history), docs/ (architecture, vcc, om, recall, append-compaction).
+Pi extension package: algorithmic session compaction for a coding agent, merging two upstream packages (pi-vcc) + (pi-observational-memory) with heavy divergence on both.
 
 ## Commands
 
@@ -14,9 +14,9 @@ pnpm check         # typecheck + lint
 ```
 
 - CI order: `build` → `typecheck` → `lint` → `test` → `format:check` (.github/workflows/ci.yml).
-- pre-commit: lint-staged (now in `package.json:lint-staged`) + typecheck. pre-push: typecheck + test (skipped for docs-only pushes).
-- pnpm only (`packageManager: pnpm@11.2.2`). TypeScript pinned to 6.0.3 for @typescript-eslint v8 compat — never bump TS alone (enforced by a dependabot `ignore` rule in `.github/dependabot.yml`).
-- `oxfmt` config and `lint-staged` live in `package.json` (no separate `.oxfmtrc.json` / `.lintstagedrc.json`); `.oxfmtignore` stays at root.
+- pre-commit: lint-staged (now in `package.json:lint-staged`) + typecheck. pre-push: typecheck + test.
+- pnpm only (`packageManager: pnpm@11.2.2`). TypeScript pinned to 6.0.3 for @typescript-eslint v8 compat — never bump TS alone.
+- `oxfmt` config and `lint-staged` live in `package.json`; `.oxfmtignore` stays at root.
 - Prepare script (`scripts/prepare.mjs`) builds dist via tsup on install; must never break consumer installs.
 
 ## Testing quirks
@@ -28,7 +28,7 @@ pnpm check         # typecheck + lint
 
 ## Architecture
 
-- `pi-entry.js` is the committed entry (registered via `pi.extensions` in package.json): fast `dist/index.js` bundle when present, fallback to `index.ts` when `dist/` is missing (git installs with `--omit=dev` → tsup missing → prepare skips). `index.ts` is the real factory — installs the host inline-compaction adapter, captures provider streams, registers consolidation + compaction triggers, `session_before_compact` + `session_compact_failed` + `context` hooks, commands, and the unified `recall` tool.
+- (registered via `pi.extensions` in package.json): fast `dist/index.js` bundle when present, fallback to `index.ts` when `dist/` is missing (git installs with `--omit=dev` → tsup missing → prepare skips). `index.ts` is the real factory — installs the host inline-compaction adapter, captures provider streams, registers consolidation + compaction triggers, `session_before_compact` + `session_compact_failed` + `context` hooks, commands, and the unified `recall` tool.
 - `src/core/` — unified config (`unified-config.ts` = defaults + resolution; env overrides declared in `config-env.ts` as `PI_BLACKHOLE_*`). configManager is the true source and entry point - users edit in UI.
 - `src/extract/` — vcc compaction section extraction (goals, files, commits, preferences, brief).
 - `src/om/` — observational memory: `agents/` (observer → reflector → dropper agent loops), `ledger/`, `runtime.ts`, `consolidation.ts`, `compaction-trigger.ts`, `cooldown.ts` (persisted fallback cooldowns), `pending.ts` (manual-mode disk buffers), `inline-compaction.ts`.
@@ -36,26 +36,25 @@ pnpm check         # typecheck + lint
 - `src/hooks/` — `before-compact.ts` (`session_before_compact`), `compact-failed.ts` (`session_compact_failed` pi >=0.84.3), `compaction-context.ts` (`context` append-mode projection).
 - `src/commands/` — `pi-vcc.ts` (`/blackhole`), `memory.ts` (`/blackhole-memory`), `vcc-recall.ts` (`/blackhole-recall`), `blackhole-export.ts` (`/blackhole-export`), `cleanup.ts`.
 - `src/tools/recall.ts` — session-history search/expand/drill-down.
-- `src/pi-base/` — **vendored copy of pi's internal core** (config manager + settings modal). Treat as upstream code: copy verbatim, surgical rewiring only, never rewrite from memory. Changes here also apply to the pi-utils monorepo context.
-- `docs/` — committed product docs: `architecture.md`, `observational-memory.md`, `recall.md`, `vcc-compaction.md`, `APPEND_COMPACTION.md`. `docs/archived_docs/` is local-only (gitignored) — working notes, bughunts, handovers.
-- `work_docs/` — separate planning - committed and tracked directory.
+- `src/pi-base/` — **vendored copy** (config manager + settings modal). Treat as upstream code: surgical rewiring and minimal fixes only if it causes runtime failures.
+- `docs/` — committed product docs: `architecture.md`, `observational-memory.md`, `recall.md`, `vcc-compaction.md`, `APPEND_COMPACTION.md`.
+- `work_docs/` — separate planning docs.
 
 ## Workflow conventions
 
-- Working branch is `dev`; `main` is the npm-published release branch. Releases: finalize CHANGELOG.md on `dev` under the new version header, rotate README ✨ What's new to the release's most substantial features (compact short form), then merge `dev` → `main` with `--no-ff` (clean, no follow-ups on `main`), bump version + tag `v*` on `main` (tag triggers `publish.yml`), then merge `main` back into `dev` (post-release sync). Default bump is patch +1 (e.g. 0.5.2 → 0.5.3); minor/major only on explicit user request. See `.pi/skills/git-ops/SKILL.md`.
+- Working branch is `dev`; `main` is the npm-published release branch.
 - Conventional commits (`feat:`, `fix:`, `chore(release):`, `build(deps-dev):` with scopes like `(pi-base)`, `(recall)`, `(export)`).
-- CHANGELOG.md is hand-maintained (keepachangelog style with a Dependencies section). `## [Unreleased]` on `dev` becomes `## [X.Y.Z] - YYYY-MM-DD` on release.
+- CHANGELOG.md should be kept up to date on substantial changes (keepachangelog style). `## [Unreleased]` on `dev` becomes `## [X.Y.Z] - YYYY-MM-DD` on release.
 - Docs consistency: every number in README.md / docs/CONFIG.md / llms.txt must match `src/core/unified-config.ts` defaults — cross-check when changing defaults. `docs/` mirrors the same source of truth.
 
 ## Debugging / runtime
 
-- Runtime clone for local testing: `~/.pi/agent/git/github.com/k0valik/pi-blackhole/` — sync changes there and `/reload` Pi.
 - `debug: true` → pre-compaction snapshot at `/tmp/pi-blackhole-debug.json`; `debugLog: true` → JSONL at `~/.pi/agent/pi-blackhole/debug.ndjson`.
-- Config lives at `~/.pi/agent/pi-blackhole/pi-blackhole-config.json`; cooldowns at `pi-blackhole-cooldown.json`. `PI_BLACKHOLE_PASSIVE=true` disables compaction + memory entirely.
+- Config lives at `~/.pi/agent/pi-blackhole/pi-blackhole-config.json`; cooldowns at `pi-blackhole-cooldown.json`.
 
 ## Testing
 
-- **T1. Prove the test fails without the fix.** Run the test against the code before the fix or guard exists, confirm it fails, then confirm it passes after. A console log showing which branch executed is a useful sanity check while writing the test, but red before green is the actual proof. If a test can't fail, it isn't testing anything.
+- **T1. Prove new tests can fail while writing them.** Write tests first: run the new test red against the code before its fix exists, then implement and run it green. Applies when you author both in this session. For verifying existing fixes (issues/PRs/uncommitted work), tests already accompany the code: run them green and confirm the assertions target the changed path — don't re-run them against pre-fix code. If a test can't fail, it isn't testing anything.
 - **T2. Arm every precondition the branch needs.** If the code path depends on prior state (a flag, a prior call, session data), set that state explicitly in the test. Don't assume execution reaches the new guard by default, check what runs before it.
 - **T3. Cover every branch, not just the happy path.** Each conditional (if/else, fallback, empty vs populated input) needs its own test case. A theme-present case and a theme-absent case are two tests, not one.
 - **T4. Assert the specific thing that would break, not a generic proxy.** A broad negative check, like asserting a substring is absent from the whole output, passes even when an unrelated change happens to introduce that same substring elsewhere. Assert against a stable, unique token or the actual structure.

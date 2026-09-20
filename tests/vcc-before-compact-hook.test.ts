@@ -38,7 +38,7 @@ function createMockPi(initialConfig?: Record<string, unknown>, ctxModel?: unknow
     compaction: "auto",
     compactionEngine: "blackhole",
     tailBehavior: "pi-default",
-    ...(initialConfig ?? {}),
+    ...initialConfig,
   };
   const ctx = {
     cwd: tmpDir,

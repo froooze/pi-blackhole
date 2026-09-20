@@ -11,27 +11,26 @@ import { describe, test, expect } from "vitest";
 import { Runtime } from "../src/om/runtime.js";
 
 describe("Consolidation pipeline — stale runtime guards", () => {
-  ("S1: appendEntry guard — stale generation rejects append",
-    () => {
-      /**
-       * This tests the appendEntry guard that PR #58 adds.
-       * When the session changes mid-pipeline, appendEntry should return false
-       * and the pipeline should abort.
-       *
-       * BUG: Without the guard, appendEntry always calls pi.appendEntry().
-       * With the guard, appendEntry checks isGenerationActive first.
-       */
-      const runtime = new Runtime("/tmp");
-      runtime.startSession("session-a");
-      const genA = runtime.captureGeneration("session-a");
+  test("S1: appendEntry guard — stale generation rejects append", () => {
+    /**
+     * This tests the appendEntry guard that PR #58 adds.
+     * When the session changes mid-pipeline, appendEntry should return false
+     * and the pipeline should abort.
+     *
+     * BUG: Without the guard, appendEntry always calls pi.appendEntry().
+     * With the guard, appendEntry checks isGenerationActive first.
+     */
+    const runtime = new Runtime("/tmp");
+    runtime.startSession("session-a");
+    const genA = runtime.captureGeneration("session-a");
 
-      // Simulate session change
-      runtime.startSession("session-b");
+    // Simulate session change
+    runtime.startSession("session-b");
 
-      // The guard should reject the append
-      expect(runtime.isGenerationActive(genA)).toBe(false);
-      expect(genA.signal.aborted).toBe(true);
-    });
+    // The guard should reject the append
+    expect(runtime.isGenerationActive(genA)).toBe(false);
+    expect(genA.signal.aborted).toBe(true);
+  });
 
   test("S2: makeModelResolver respects AbortSignal — returns undefined after abort", async () => {
     /**

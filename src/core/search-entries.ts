@@ -2,7 +2,10 @@
  * Search entries — BM25 + regex search over session history.
  *
  * Upstream: https://github.com/sting8k/pi-vcc (src/core/search-entries.ts)
- * Unmodified.
+ * Amended (#106): CJK queries are word-segmented via Intl.Segmenter before
+ * term compilation (whole Chinese sentences used to compile to one literal
+ * pattern), and BM25 document length uses a script-aware word count (CJK
+ * docs used to count as 1 word, voiding length normalization).
  */
 import type { Message } from "@earendil-works/pi-ai";
 import type { RenderedEntry } from "./render-entries";
@@ -13,6 +16,7 @@ import {
   isContentBearing,
   clip,
 } from "./content";
+import { estimateWordCount, hasCJK, isWordSegment, wordSegments } from "./segment.js";
 import type { RecallMode } from "./recall-scope";
 
 // Mirrors @earendil-works/pi-coding-agent's BashExecutionMessage (not re-exported from index)
@@ -199,6 +203,35 @@ const filterStopwords = (terms: string[]): string[] => {
   return meaningful.length > 0 ? meaningful : terms;
 };
 
+/**
+ * Split a query into terms. Whitespace splits handle English; CJK segments
+ * are word-segmented via Intl.Segmenter (ICU dictionary) since CJK text
+ * carries no spaces — an unsegmented Chinese sentence compiles to one
+ * literal pattern that only matches verbatim (#106). Operator-bearing
+ * segments keep their regex intent and are passed through unsegmented.
+ */
+const queryTerms = (raw: string): string[] => {
+  const parts = raw.split(/\s+/);
+  if (!hasCJK(raw)) return parts;
+  const terms: string[] = [];
+  for (const part of parts) {
+    if (!part) continue;
+    // Operator-bearing parts keep their regex semantics (segmenting would
+    // break patterns like 面板|dashboard); ASCII parts are already
+    // whitespace-split — only operator-free CJK parts need ICU segmentation
+    if (REGEX_TERM_HINT.test(part) || !hasCJK(part)) {
+      terms.push(part);
+      continue;
+    }
+    for (const seg of wordSegments(part)) {
+      if (isWordSegment(seg)) terms.push(seg.segment);
+    }
+  }
+  // All segmented terms dropped (e.g. single-char particles only): fall back
+  // to the raw split, matching the unsegmented behavior
+  return terms.length > 0 ? terms : parts;
+};
+
 /** Count how many distinct terms match the haystack. */
 const countMatches = (hay: string, compiled: CompiledTerm[]): number => {
   let count = 0;
@@ -232,7 +265,7 @@ const buildBM25Context = (docs: string[], compiled: CompiledTerm[]): BM25Context
   let totalLen = 0;
 
   for (const doc of docs) {
-    totalLen += doc.split(/\s+/).length;
+    totalLen += estimateWordCount(doc);
     for (const c of compiled) {
       if (c.pattern.test(doc)) {
         df.set(c.term, (df.get(c.term) ?? 0) + 1);
@@ -245,7 +278,7 @@ const buildBM25Context = (docs: string[], compiled: CompiledTerm[]): BM25Context
 
 /** BM25+ score for a single doc against query terms. */
 const bm25Score = (doc: string, compiled: CompiledTerm[], ctx: BM25Context): number => {
-  const dl = doc.split(/\s+/).length;
+  const dl = estimateWordCount(doc);
   let score = 0;
 
   for (const c of compiled) {
@@ -402,14 +435,15 @@ export function getFileIndicators(msg: Message): FileMatch[] {
   return fileMatches;
 }
 
-function computeFileMatches(msg: Message | undefined, query: string): FileMatch[] {
+function computeFileMatches(msg: Message | undefined, terms: string[]): FileMatch[] {
   if (!msg?.content || typeof msg.content === "string") return [];
-  const rawQuery = query.trim();
-  const hasQuery = rawQuery.length > 0;
+  const hasQuery = terms.length > 0;
   if (!hasQuery) return getFileIndicators(msg as Message);
+  // Same segmented terms as ranking (queryTerms), so a CJK natural-language
+  // query also matches file text without appearing verbatim (#106).
   // Per-term matchers: operator-bearing terms stay patterns, plain terms
   // (including dotted filenames) match literally.
-  const regex = snippetRegex(rawQuery.split(/\s+/));
+  const regex = snippetRegex(terms);
   const fileMatches: FileMatch[] = [];
 
   for (const part of msg.content) {
@@ -509,7 +543,8 @@ export const searchEntriesDetailed = (
   // including dotted filenames ("observer.ts") — match literally. A natural
   // sentence mentioning a file therefore reaches BM25 ranking instead of
   // being compiled as one (never-matching) whole-query pattern.
-  const rawTerms = rawQuery.split(/\s+/);
+  // Terms split above; CJK segments are word-segmented (see queryTerms)
+  const rawTerms = queryTerms(rawQuery);
   const terms = filterStopwords(rawTerms);
   const compiled = compileTerms(terms);
   const snipRe = snippetRegex(terms);
@@ -537,7 +572,7 @@ export const searchEntriesDetailed = (
     const score = bm25Score(hay, compiled, ctx);
     const text = fullTextCache[i];
     const snip = lineSnippet(text, snipRe);
-    const fileMatches = computeFileMatches(messages[i], rawQuery);
+    const fileMatches = computeFileMatches(messages[i], terms);
     const extra = fileMatches.length > 0 ? { fileMatches } : {};
     scored.push({
       hit: { ...e, snippet: snip, matchCount: mc, ...extra },

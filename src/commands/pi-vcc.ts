@@ -130,7 +130,7 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
       );
       if (nearMiss) {
         ctx.ui.notify(
-          `/blackhole ${nearMiss} accepts no arguments. Did you mean \"/blackhole ${nearMiss}\"?`,
+          `/blackhole ${nearMiss} accepts no arguments. Did you mean "/blackhole ${nearMiss}"?`,
           "warning",
         );
         return;

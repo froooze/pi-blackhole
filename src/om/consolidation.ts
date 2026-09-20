@@ -21,6 +21,7 @@ import {
   isStaleExtensionContextError,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
+import { estimateEntryTokens } from "./tokens.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
 
 /** Fixed overhead for system prompt, tool definitions, and turn scaffold in context window pre-check. */
@@ -98,45 +99,20 @@ function sourceEntriesAfter(entries: Entry[], index: number): Entry[] {
 /**
  * Cap source entries to maxTokens by keeping newest entries first,
  * walking backwards until the token budget is exceeded.
- * Uses a conservative chars/4 heuristic for token estimation.
+ * Reuses estimateEntryTokens (the same estimator rawTokensAfterIndex uses for
+ * the trigger) so the cap and the trigger never drift apart (#110).
  */
-function capSourceEntriesToTokens(entries: Entry[], maxTokens: number): Entry[] {
+export function capSourceEntriesToTokens(entries: Entry[], maxTokens: number): Entry[] {
   let totalTokens = 0;
   const kept: Entry[] = [];
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    let chars = 0;
-    // Tokenize all entry types, not just "message": custom_message and
-    // branch_summary entries also consume observer context window.
-    if (entry.type === "message" && entry.message) {
-      const msg = entry.message as any;
-      if (typeof msg.content === "string") chars = msg.content.length;
-      else if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-          if (block.text) chars += block.text.length;
-        }
-      }
-    } else if (
-      entry.type === "custom" &&
-      (entry.customType === OM_OBSERVATIONS_RECORDED ||
-        entry.customType === OM_REFLECTIONS_RECORDED ||
-        entry.customType === OM_OBSERVATIONS_DROPPED)
-    ) {
-      // Custom entries carry structured data — estimate from JSON serialization
-      chars = String(JSON.stringify(entry.data ?? {})).length;
-    } else if (entry.summary) {
-      chars = String(entry.summary).length;
-    }
-    const estTokens = Math.ceil(chars / 4);
-    if (totalTokens + estTokens > maxTokens && kept.length > 0) break;
-    // Remove the `kept.length > 0` guard? No — keep the guard but allow
-    // the first entry to be dropped only if it exceeds maxTokens alone.
-    // (The guard against empty kept list prevents dropping the first entry
-    // when later entries are small; but a single oversized entry should
-    // still be included to avoid losing the newest data entirely.)
-    if (totalTokens + estTokens > maxTokens && kept.length === 0) {
-      // First (newest) entry exceeds maxTokens alone — include it anyway
-      // to avoid data loss, but don't add more.
+    const estTokens = estimateEntryTokens(entry);
+    if (totalTokens + estTokens > maxTokens) {
+      // Newest-first walk stops as soon as the budget is exceeded — except
+      // for the newest entry itself: a single oversized entry is still
+      // included (kept.length === 0) so the newest data is never lost.
+      if (kept.length > 0) break;
       kept.unshift(entry);
       break;
     }
@@ -711,6 +687,12 @@ export async function runObserverStage(
   } = serializeSourceAddressedBranchEntries(chunkEntries);
   if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
   const chunkTokens = Math.ceil(chunk.length / 4);
+  // Issue #110 follow-up: expose the post-cap size on the normal path (the
+  // exceptional context_window_exceeded path already logs estimatedInput).
+  // capTokens is the exact quantity capSourceEntriesToTokens enforced (the
+  // same estimateEntryTokens the trigger uses), so it can confirm/rule out
+  // the cap bug in a running install.
+  const capTokens = chunkEntries.reduce((s: number, e) => s + estimateEntryTokens(e), 0);
 
   const memory = fullProjection(entries);
   let priorReflections = memory.reflections.map(reflectionToSummaryLine);
@@ -773,6 +755,9 @@ export async function runObserverStage(
     );
     debugLog("observer.start", {
       tokens,
+      maxChunkTokens,
+      chunkTokens,
+      capTokens,
       coversUpToId,
       sourceEntryIds,
       sourceEntryCount: sourceEntryIds.length,

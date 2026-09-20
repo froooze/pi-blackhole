@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/core/summarize.js";
+import { formatFileList } from "../src/extract/files.js";
 import { userMsg } from "./vcc-fixtures.js";
 
 describe("vcc-summarize robust merging and stripping", () => {
@@ -300,6 +301,171 @@ describe("vcc-summarize robust merging and stripping", () => {
       });
       expect(r).toContain("- Goal");
       expect(r).toContain("substantial");
+    });
+  });
+
+  describe("Files And Changes merge vs wrapped / hand-written previous summaries (#105)", () => {
+    it("ignores inline [Files And Changes] mentions in a pi-native previous summary", () => {
+      // Hand-written pi-native summaries mention `[Files And Changes]` inline
+      // (backticked, mid-paragraph) without carrying a real section. The merge
+      // must not treat the text from that mention onward as the previous
+      // Files section — otherwise prose lines shaped like "- Modified: ..."
+      // bleed into [Files And Changes] as phantom entries.
+      const previousSummary = [
+        "## Goal",
+        "Fix the `[Files And Changes]` section attribution when modern tools are used.",
+        "",
+        "## Notes",
+        "- Modified: hand-written prose that is not a file entry",
+      ].join("\n");
+      const r = compile({
+        messages: [userMsg("check")],
+        previousSummary,
+        fileOps: { readFiles: [], modifiedFiles: ["/repo/src/real.ts", "/repo/src/other.ts"] },
+        cwd: "/repo",
+      });
+      // paths render cwd-relative, one per line under a counted header
+      expect(r).toContain("Modified (2):");
+      expect(r).toContain("src/real.ts");
+      expect(r).toContain("src/other.ts");
+      expect(r).not.toContain("/repo/");
+      expect(r).not.toContain("hand-written prose");
+    });
+
+    it("keeps every fresh file when the fresh Files section wraps across lines", () => {
+      // Eight long display paths exceed the 120-char wrap width on their own,
+      // so the fresh "- Modified: ..." bullet spans several physical lines.
+      // The merge must rejoin those continuation lines instead of keeping
+      // only the entries on the first line, and must retain previous-only
+      // entries.
+      const previousSummary = "[Files And Changes]\n- Modified: prev-only.ts\n\n---\n\n[user]\nold";
+      const names = [
+        "alpha-module",
+        "beta-module",
+        "gamma-module",
+        "delta-module",
+        "epsilon-module",
+        "zeta-module",
+        "theta-module",
+        "iota-module",
+      ];
+      const files = names.map((n) => `/repo/src/${n}.ts`);
+      const r = compile({
+        messages: [userMsg("check")],
+        previousSummary,
+        fileOps: { readFiles: [], modifiedFiles: files },
+        cwd: "/repo",
+      });
+      for (const n of names) {
+        expect(r, `fresh file ${n}.ts dropped from merged output`).toContain(`${n}.ts`);
+      }
+      expect(r).toContain("prev-only.ts");
+    });
+
+    it("keeps (staged,unstaged) tags intact across merge without duplicating the file", () => {
+      // A combined git tag contains a comma. Splitting entries on every comma
+      // breaks it into partial keys ("main.ts (staged", "unstaged)") that
+      // defeat prev/fresh dedup — the file then appears twice and the stale
+      // tag survives alongside the fresh one.
+      const previousSummary =
+        "[Files And Changes]\n- Modified: src/main.ts (staged,unstaged), src/b.ts (new)\n\n---\n\n[user]\nold";
+      const r = compile({
+        messages: [userMsg("check")],
+        previousSummary,
+        // Fresh keys render cwd-relative ("src/main.ts"), matching the
+        // previous keys above.
+        fileOps: { readFiles: [], modifiedFiles: ["/repo/src/main.ts", "/repo/src/other.ts"] },
+        cwd: "/repo",
+        gitTags: new Map([["/repo/src/main.ts", "staged"]]),
+      });
+      expect(r.match(/main\.ts/g)?.length).toBe(1);
+      expect(r).toContain("src/main.ts (staged)");
+      expect(r).not.toContain("unstaged)");
+      // Previous-only entry survives (stale tags are stripped by design).
+      expect(r).toContain("src/b.ts");
+    });
+
+    it("keeps the newest files when the merged list exceeds the cap", () => {
+      // Fresh entries parse first (most recent first), prev-only entries
+      // append after — so the keep-first-20 cap retains fresh touches and
+      // drops the oldest prev entries, not the other way around. Prev lines
+      // are stored newest-first, so old-23 is the stalest entry here.
+      const prevFiles = Array.from({ length: 24 }, (_, i) => `old-${i}.ts`);
+      const previousSummary = `[Files And Changes]\n- Modified: ${prevFiles.join(", ")}\n\n---\n\n[user]\nold`;
+      const r = compile({
+        messages: [userMsg("check")],
+        previousSummary,
+        fileOps: { readFiles: [], modifiedFiles: ["/repo/src/new-a.ts", "/repo/src/new-b.ts"] },
+        cwd: "/repo",
+      });
+      expect(r).toContain("new-a.ts");
+      expect(r).toContain("new-b.ts");
+      expect(r).toContain("old-0.ts");
+      expect(r).toContain("old-17.ts");
+      expect(r).not.toContain("old-23.ts");
+      // The (+N more) suffix may wrap across lines — normalize first.
+      expect(r.replace(/\n\s*/g, " ")).toContain("(+6 more)");
+    });
+
+    it("keeps both forms when upgrading from an absolute-path previous summary", () => {
+      // Display switched from absolute/longest-prefix-trimmed to
+      // cwd-relative: a previous summary written by the old format keys
+      // "/repo/src/a.ts" while fresh renders "src/a.ts". The merge cannot
+      // know they are the same file, so both appear for exactly one
+      // compaction — no data loss, and the next cycle dedupes cleanly.
+      const previousSummary =
+        "[Files And Changes]\n- Modified: /repo/src/a.ts\n\n---\n\n[user]\nold";
+      const r = compile({
+        messages: [userMsg("check")],
+        previousSummary,
+        fileOps: { readFiles: [], modifiedFiles: ["/repo/src/a.ts"] },
+        cwd: "/repo",
+      });
+      expect(r).toContain("src/a.ts");
+      expect(r).toContain("/repo/src/a.ts");
+    });
+
+    it("reassembles a path hard-wrapped across lines in the previous section", () => {
+      // wrapLongLines hard-breaks an overlong single-token path mid-word
+      // (no space at the break). The merge must treat the indented physical
+      // fragments of one logical entry — terminated by its trailing comma —
+      // as ONE path, not two phantom entries.
+      const core = "a".repeat(118);
+      const first = compile({
+        messages: [userMsg("check")],
+        fileOps: { readFiles: [], modifiedFiles: [`/repo/src/${core}.ts`] },
+        cwd: "/repo",
+      });
+      // Sanity: the stored form really hard-breaks the path across lines.
+      expect(first).toContain("\n  ");
+
+      const r = compile({
+        messages: [userMsg("check 2")],
+        previousSummary: first,
+        fileOps: { readFiles: [], modifiedFiles: ["/repo/src/other.ts"] },
+        cwd: "/repo",
+      });
+      // Unwrap continuation lines the same way the merge reassembles them
+      // (direct concatenation — the hard break carried no space).
+      const unwrapped = r.replace(/\n {2}(?=\S)/g, "");
+      expect(unwrapped).toContain(`src/${core}.ts`);
+    });
+
+    it("preserves the previous total when the previous list was capped", () => {
+      // A capped previous section (26 files, 20 shown, +6 omitted) shrinks
+      // after a merge unless the header count is carried forward: the
+      // omitted entries are unparsable, so the rendered total must stay at
+      // max(preserved, merged) instead of collapsing to the parsed size.
+      const prevPaths = Array.from({ length: 26 }, (_, i) => `old-${i}.ts`);
+      const previousSummary = `[Files And Changes]\n- ${formatFileList("Modified", prevPaths, 20)}\n\n---\n\n[user]\nold`;
+      const r = compile({
+        messages: [userMsg("check")],
+        previousSummary,
+        fileOps: { readFiles: [], modifiedFiles: ["/repo/src/new.ts"] },
+        cwd: "/repo",
+      });
+      expect(r).toContain("Modified (26):");
+      expect(r.replace(/\n\s*/g, " ")).toContain("(+6 more)");
     });
   });
 });

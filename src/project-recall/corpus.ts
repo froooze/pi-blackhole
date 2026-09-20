@@ -320,10 +320,10 @@ function extractFromPendingState(
     }
   }
   for (const batch of allDroppedBatches) {
-    if (Array.isArray(batch.data?.observationIds)) {
-      for (const id of batch.data?.observationIds as unknown[]) {
-        if (typeof id === "string") droppedIds.add(id);
-      }
+    const ids = batch.data?.observationIds;
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids as unknown[]) {
+      if (typeof id === "string") droppedIds.add(id);
     }
   }
 }

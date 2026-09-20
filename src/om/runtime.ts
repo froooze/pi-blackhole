@@ -17,6 +17,7 @@ import {
   expireCooldowns,
   modelKey,
   sanitizeCooldownReason,
+  getCooldownEntry,
 } from "./cooldown.js";
 import { isDeterministicError } from "./retryable-error.js";
 import { readPendingCursors, writePendingCursors } from "./pending.js";
@@ -393,6 +394,7 @@ export class Runtime {
           ctx.ui,
           `Observational memory: ${stageName} skipping ${key} (failed this cycle, cooldown disabled)`,
         );
+        debugLog("model.failed_this_cycle", { stage: stageName, model: key });
         continue;
       }
 
@@ -404,6 +406,17 @@ export class Runtime {
           ctx.ui,
           `Observational memory: ${stageName} skipping ${key} (cooldown — details in cooldown log)`,
         );
+        // Issue #110 follow-up: a cycle skipped by cooldown is otherwise
+        // invisible in the debug log (only the toast shows it). Emit the
+        // persisted reason so log-only readers can compute denominators.
+        const cooldown = getCooldownEntry(candidate);
+        debugLog("model.cooldown_skip", {
+          stage: stageName,
+          model: key,
+          ...(cooldown
+            ? { until: cooldown.until, reason: cooldown.reason, cooldownStage: cooldown.stage }
+            : {}),
+        });
         continue;
       }
 

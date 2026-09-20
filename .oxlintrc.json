@@ -23,7 +23,9 @@
       // the eslint config had.
       "files": ["src/pi-base/**/*.ts"],
       "rules": {
-        "no-unused-vars": "off"
+        "no-unused-vars": "off",
+        "no-unassigned-vars": "off",
+        "no-useless-catch": "off"
       }
     }
   ]

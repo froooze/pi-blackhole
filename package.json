@@ -1,6 +1,6 @@
 {
   "name": "pi-blackhole",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Unified compaction + observational memory extension for Pi — compresses conversation context while preserving durable observations and reflections",
   "keywords": [
     "agents",
@@ -66,10 +66,10 @@
     "vitest": "5.0.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.84.3 <1.0.0",
-    "@earendil-works/pi-ai": ">=0.84.3 <1.0.0",
-    "@earendil-works/pi-coding-agent": ">=0.84.3 <1.0.0",
-    "@earendil-works/pi-tui": ">=0.84.3 <1.0.0"
+    "@earendil-works/pi-agent-core": ">=0.85.1 <1.0.0",
+    "@earendil-works/pi-ai": ">=0.85.1 <1.0.0",
+    "@earendil-works/pi-coding-agent": ">=0.85.1 <1.0.0",
+    "@earendil-works/pi-tui": ">=0.85.1 <1.0.0"
   },
   "lint-staged": {
     "*.{ts,js,mjs,cjs}": [

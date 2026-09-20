@@ -31,13 +31,13 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## ✨ What's new
 
-> **Latest release: [0.5.5](CHANGELOG.md)**
+> **Latest release: [0.5.6](CHANGELOG.md)**
 >
-> - **Custom-provider memory workers fixed** — observer/reflector/dropper requests now carry Pi's session headers, so gateways that require them (OpenCode `MissingSessionID`) stop rejecting every worker call. ([#93](https://github.com/k0valik/pi-blackhole/issues/93))
-> - **Deterministic provider errors cool down into fallbacks** — bad credentials, unknown models, and other 4xx failures stop burning retries on the broken model and fall through to `*FallbackModels` instead.
-> - **Skipped subagent compactions are now visible** — in-memory sessions disposed before deferred compaction now count (`Skipped compactions (disposed ctx)` in `/blackhole-memory` status) and warn once per session instead of failing silently. ([#92](https://github.com/k0valik/pi-blackhole/issues/92))
-> - **Mid-run compaction works on unbundled Pi installs** — per-root host discovery plus per-host helper binding, so the inline path no longer stays silently unavailable. ([#96](https://github.com/k0valik/pi-blackhole/issues/96))
-> - **Minimum supported Pi is 0.84.3**, and the compat CI job now tracks the `peerDependencies` floor instead of a hardcoded version.
+> - **Non-English (CJK) sessions are now fully script-aware** — token accounting counts CJK as ~1 token/char (no more ~3× silent overage), text clipping and `recall` queries respect CJK punctuation and word boundaries, and the extractors accept CJK correction anchors and failure stems. ([#105](https://github.com/k0valik/pi-blackhole/issues/105), [#106](https://github.com/k0valik/pi-blackhole/issues/106))
+> - **`[Files And Changes]` and `[Commits]` extract what actually happened** — file attribution correlates tool calls with results instead of guessing from a hardcoded tool list, and commit capture understands real-world flag orders and heredocs. ([#105](https://github.com/k0valik/pi-blackhole/issues/105))
+> - **Observer chunks always respect `maxTokens`** — `custom_message` entries (previously zero-counted) are now sized like every other entry. ([#110](https://github.com/k0valik/pi-blackhole/issues/110))
+> - **`[Files And Changes]` display and cross-compaction merge overhauled** — cwd-relative paths, capped lists that never shrink, and `(#N)` drill-down refs.
+> - **Pre-compaction output stays visible after compaction** — the newest assistant text dropped by compaction re-renders as a display-only block (16 KiB cap, text only), so recent work stays readable without opening `/tree`. Opt out via `showPreCompactionMessage`. ([#103](https://github.com/k0valik/pi-blackhole/pull/103))
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

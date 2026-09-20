@@ -27,6 +27,8 @@ import { effectiveContextWindow } from "../om/model-budget.js";
 import { DEFAULTS, configFileNeedsMigration } from "../core/unified-config.js";
 import { buildRetainedToolOutputProjection } from "../core/tool-output-budget.js";
 import { buildGlobalIndexById, loadGlobalIndexById } from "../core/global-indices.js";
+import { loadGitFileTags } from "../extract/git-status.js";
+import { collectFilesTouched } from "../extract/file-touch.js";
 
 export const PI_VCC_COMPACT_INSTRUCTION = "__pi_vcc__";
 
@@ -591,15 +593,28 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
       readFiles: [...preparation.fileOps.read],
       modifiedFiles: [...preparation.fileOps.written, ...preparation.fileOps.edited],
     };
+    // Git working-tree tags for fresh-window annotations; empty (no
+    // annotations) outside a repo or if git fails.
+    const gitTags = loadGitFileTags(ctx.cwd ?? process.cwd());
     const summary = compile({
       messages,
       previousSummary: preparation.previousSummary,
       fileOps,
       sourceIndices,
+      touchMessages: agentMessages,
+      cwd: ctx.cwd ?? process.cwd(),
+      gitTags,
     });
     const freshSegmentSummary =
       omRuntime.config.compactionSummaryMode === "append"
-        ? compileSegment({ messages, fileOps, sourceIndices })
+        ? compileSegment({
+            messages,
+            fileOps,
+            sourceIndices,
+            touchMessages: agentMessages,
+            cwd: ctx.cwd ?? process.cwd(),
+            gitTags,
+          })
         : "";
 
     const branchIds = branchEntries.map((e: any) => e.id);
@@ -636,9 +651,28 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
       sections: [...summary.matchAll(/^\[(.+?)\]/gm)].map((m) => m[1]),
     });
 
+    // The trace call below applies the debugLog flag internally, but its
+    // argument object is evaluated eagerly — gate the diagnostic collection
+    // here so it costs nothing when debugging is off.
+    const debugLogEnabled = omRuntime.config.debugLog === true;
     trace("before_compact.summary_generated", {
       summaryLength: summary.length,
       messageCount: agentMessages.length,
+      // Live attribution signal (#105): how many files the touch collector
+      // saw in the raw pre-conversion messages. A 0 here alongside a rich
+      // window means the in-memory toolCall block shape differs from the
+      // serialized JSONL shape the collector was built against. Computed only
+      // when debugLog is enabled (zero cost by default, and no duplicate of
+      // the collection pass inside compile → buildSections).
+      filesTouchedCount: !debugLogEnabled
+        ? undefined
+        : (() => {
+            try {
+              return collectFilesTouched(agentMessages, ctx.cwd ?? process.cwd()).length;
+            } catch {
+              return undefined;
+            }
+          })(),
     });
 
     let allEntries: any[] = [];

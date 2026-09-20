@@ -22,6 +22,7 @@ The config file must contain **valid JSON**. A trailing comma, partial write, or
   "compaction": "auto",           // "auto" | "manual" | "off"
   "compactionEngine": "blackhole", // "blackhole" | "pi-default"
   "tailBehavior": "minimal",   // "pi-default" | "minimal"
+  "showPreCompactionMessage": true, // Display-only copy of the newest dropped assistant output (max 16 KiB)
   "midRunCompaction": "off",    // "resume" | "pause" | "off" (default: off)
   "compactionSummaryMode": "default", // "default" | "append" (default: "default")
   "compactAfterTokens": 0,        // Explicit fixed threshold. 0 = not set (a ratio, reserve, or preset curve governs). Never exactly 81000 (legacy residue — dropped)
@@ -162,17 +163,42 @@ minimal (last user at m5):
 { "tailBehavior": "pi-default" }
 ```
 
+### `showPreCompactionMessage`
+
+Default `true`. After a successful Blackhole compaction, append a display-only copy of the **newest assistant output that the cut removed from view** so the terminal keeps showing the answer you were reading.
+
+| Value | Behavior |
+|-------|----------|
+| `true` | Copy up to 16 KiB of the newest dropped assistant text into a plain `blackhole-pre-compaction-output` session entry, rendered as `[Previous output — display only]` below the retained tail and above the compaction card. |
+| `false` | No copy; the compaction card appears alone (pre-0.5.x behavior). |
+
+The copy is **cosmetic**: Pi renders the entry but never sends it to the model (`sessionEntryToContextMessages` returns nothing for plain `custom` entries), and Blackhole's own serializers only read `message`, `custom_message`, and `branch_summary` entries. It does not change `firstKeptEntryId`, the summary, or the auto-compaction threshold.
+
+When the newest dropped message is already retained by the cut (the common `minimal` case, where the last user turn and everything after it stay visible), nothing is copied — no duplicates. Compact-all with no retained tail copies the final answer instead.
+
+Things that stay out of the copy: tool output, thinking blocks, images, and exact card layout. The copy is truncated at 16 KiB with a `[Copy truncated]` marker; each eligible compaction adds one entry to the session file (a bounded disk and redraw cost, not a token cost).
+
+```jsonc
+// Default: keep the newest dropped answer visible
+{ "showPreCompactionMessage": true }
+
+// Plain compaction card only
+{ "showPreCompactionMessage": false }
+```
+
 ### `midRunCompaction`
 
 Controls the **mid-run** auto-compaction trigger. Pi's `agent_end` event only fires when a run exits — during long tool loops (agent calling tools turn after turn) the threshold would otherwise never be evaluated, and accumulated tokens could blow far past the auto-compaction threshold before compaction had any chance to run. This trigger evaluates the threshold at every `turn_end` (after each assistant message + tool executions) while the agent is still working.
 
 Only applies when `compaction: "auto"` and `compactionEngine: "blackhole"`.
 
+Full mechanism, history, and debugging guide: [mid-run-compaction.md](mid-run-compaction.md).
+
 | Value | Behavior |
 |-------|----------|
 | `"resume"` *(experimental)* | Compact transparently at an awaited `turn_end`, then continue inside the **same** agent run and outer `session.prompt()` promise. No run abort and no synthetic continuation message. |
 | `"pause"` | Use Pi's native interrupting `ctx.compact()` at the threshold, then stop. The user continues manually. |
-| `"off"` | No mid-run evaluation; only check the threshold when the agent finishes a run (default). |
+| `"off"` | No mid-run evaluation; only check the threshold when the agent finishes a run (default). Non-persisted sessions (see below) always use the inline path instead. |
 
 `"resume"` reuses Pi's native summary, `session_before_compact`, session-entry, and context-rebuild pipeline. Blackhole's runtime adapter suppresses only the compaction method's initial internal quiesce (`abort`, plus disconnect on older Pi), then refreshes the low-level loop from the compacted `agent.state.messages` before another provider request. Completed tools stay paired, the active run signal is not aborted, background agents do not receive a false interrupt, and nested runners keep awaiting their original prompt promise.
 
@@ -180,7 +206,7 @@ Only applies when `compaction: "auto"` and `compactionEngine: "blackhole"`.
 
 `"pause"` is intentionally different: it calls public `ctx.compact()`, which aborts the active run by design. That abort may propagate to extensions which treat the run signal as user cancellation, so use `"resume"` for transparent/subagent workflows.
 
-**Headless sessions (subagents, flow runners).** In-memory sessions (`SessionManager.inMemory()`) are typically disposed by their parent right after `agent_end`, so the deferred `agent_end` compaction reliably loses that race and bails on a stale extension ctx — under `"off"` such sessions are effectively never compacted ([#92](https://github.com/k0valik/pi-blackhole/issues/92)). Every skipped compaction is counted and surfaced: the `/blackhole-memory` status shows `Skipped compactions (disposed ctx): N`, and each affected session warns once (UI notification, or stderr for headless runs).
+**Non-persisted sessions (subagents, SDK/flow runners).** In-memory sessions (`SessionManager.inMemory()`) are typically disposed by their parent right after `agent_end`, so the deferred `agent_end` compaction reliably loses that race and bails on a stale extension ctx ([#92](https://github.com/k0valik/pi-blackhole/issues/92)); and `"pause"`'s run-interrupting `ctx.compact()` has no user to hand control back to. Non-persisted sessions therefore resolve **all three** `midRunCompaction` values to the transparent inline path at `turn_end` — same-run continuation, no abort, runner lifecycle untouched. Persisted sessions (TUI, file-backed) keep the configured semantics exactly. Fail-closed: when the inline adapter is unsupported for the host, non-persisted sessions skip mid-run compaction entirely — surfaced once per process via the `agent_start` warning; per-turn skips are debug-logged only (they are not counted, since the skip fires every turn while over threshold and would inflate a counter denominated in scheduled compactions). Separate visibility: every *scheduled* auto-compaction skipped because the ctx went stale is counted (`Skipped compactions (disposed ctx): N` in `/blackhole-memory` status, process-wide so a parent surfaces nested-session skips) and warned once per session (UI notification, or stderr for headless runs). Adapter-unavailable warnings are UI-only by design — headless sessions get no `console.warn` (it would leak into the subagent transcript) and the parent cannot be reached without knowing the subagent host, so headless operators watch `debug.ndjson` instead. The `agent_end` deferral remains as a backstop for persisted sessions and for pressure that only crosses the threshold on a run's final turn; non-persisted sessions with an unsupported adapter skip the settled path too (fail-closed).
 
 **Re-trigger safety:** after a successful compaction, accumulated tokens are counted from the fresh compaction entry. Failed or cancelled attempts are suspended until pressure drops below the threshold.
 
@@ -564,6 +590,7 @@ Boolean parsing accepts `1`, `true`, `yes`, `on` (and `0`, `false`, `no`, `off`)
 | `PI_BLACKHOLE_COMPACTION` | `compaction` (`auto` \| `manual` \| `off`) | `PI_BLACKHOLE_COMPACTION=manual` |
 | `PI_BLACKHOLE_COMPACTION_ENGINE` | `compactionEngine` (`blackhole` \| `pi-default`) | `PI_BLACKHOLE_COMPACTION_ENGINE=pi-default` |
 | `PI_BLACKHOLE_MID_RUN_COMPACTION` | `midRunCompaction` (`resume` \| `pause` \| `off`) | `PI_BLACKHOLE_MID_RUN_COMPACTION=resume` |
+| `PI_BLACKHOLE_SHOW_PRE_COMPACTION_MESSAGE` | `showPreCompactionMessage` (`true` \| `false`) | `PI_BLACKHOLE_SHOW_PRE_COMPACTION_MESSAGE=off` |
 | `PI_BLACKHOLE_COMPACTION_SUMMARY_MODE` | `compactionSummaryMode` (`default` \| `append`) | `PI_BLACKHOLE_COMPACTION_SUMMARY_MODE=append` |
 
 ### Passive mode (legacy)

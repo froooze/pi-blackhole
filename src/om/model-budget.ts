@@ -42,7 +42,7 @@ export const BUILTIN_PRESETS: Record<string, PresetAnchor[]> = {
 export function effectivePresets(
   cfg: Pick<CompactThresholdConfig, "compactAfterPresets">,
 ): Record<string, PresetAnchor[]> {
-  return { ...BUILTIN_PRESETS, ...(cfg.compactAfterPresets ?? {}) };
+  return { ...BUILTIN_PRESETS, ...cfg.compactAfterPresets };
 }
 
 /**
@@ -105,7 +105,7 @@ export function compactThresholdTokens(cfg: CompactThresholdConfig, contextWindo
     if (!warnedPresetNames.has(name)) {
       warnedPresetNames.add(name);
       console.warn(
-        `blackhole: unknown compaction preset "${name}" — falling back to the built-in \"default\" curve`,
+        `blackhole: unknown compaction preset "${name}" — falling back to the built-in "default" curve`,
       );
     }
     return Math.max(

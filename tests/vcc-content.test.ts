@@ -3,7 +3,7 @@
  * Changes: bun:test → vitest, added .js import extensions
  */
 import { describe, it, expect } from "vitest";
-import { textParts, textOf } from "../src/core/content.js";
+import { clip, clipSentence, textParts, textOf } from "../src/core/content.js";
 
 describe("textParts", () => {
   it("returns [] for undefined content", () => {
@@ -198,5 +198,88 @@ describe("isContentBearing", () => {
     expect(isContentBearing({ filePath: "x.ts", content: "a" })).toBe(true);
     expect(isContentBearing({ file_path: "x.ts", content: "a" })).toBe(true);
     expect(isContentBearing({ file: "x.ts", content: "a" })).toBe(true);
+  });
+});
+
+describe("clipSentence — CJK sentence boundaries (#106)", () => {
+  it("cuts after a CJK ideographic full stop without trailing space", () => {
+    const head = "中".repeat(55);
+    const text = `${head}。后面还有更多中文内容没有结束`;
+    expect(clipSentence(text, 60)).toBe(`${head}。`);
+  });
+
+  it("cuts after a fullwidth exclamation mark followed directly by text", () => {
+    const head = "啊".repeat(50);
+    const text = `${head}！然后继续说话说个不停说个不停说个不停说个不停`;
+    expect(clipSentence(text, 60)).toBe(`${head}！`);
+  });
+
+  it("keeps English behavior: cut after '.' followed by space", () => {
+    // '.' at index 16, end 17 ≥ 30*0.5=15 → accepted by the sentence window
+    const text = `Some words here. ${"b".repeat(40)}`;
+    expect(clipSentence(text, 30)).toBe("Some words here.");
+  });
+
+  it("keeps English behavior: no cut mid-word without space", () => {
+    const text = `firstsecond${"c".repeat(60)}`;
+    // No sentence boundary in the window and no space → hard cut via clip()
+    expect(clipSentence(text, 40)).toBe(text.slice(0, 40));
+  });
+
+  it("falls back to clip() when no CJK sentence terminator is in the window", () => {
+    const text = `${"中".repeat(40)}，${"文".repeat(40)}`;
+    // No 。！？ in the window → clip() → CJK pause fallback cuts after ，
+    expect(clipSentence(text, 50)).toBe(`${"中".repeat(40)}，`);
+  });
+
+  it("cuts after a CJK terminator followed directly by ASCII text", () => {
+    // Mixed-script: the terminator is a boundary even when followed by
+    // ASCII letters, not CJK
+    const head = "中".repeat(55);
+    const text = `${head}。Hello world, this continues in English`;
+    expect(clipSentence(text, 60)).toBe(`${head}。`);
+  });
+
+  it("cuts after a CJK terminator followed by a supplementary-plane Han char", () => {
+    // U+20BB7 𠮷 (2 UTF-16 units) — a follower-class lookahead would miss it
+    const head = "中".repeat(55);
+    const text = `${head}。𠮷野家という名前です`;
+    expect(clipSentence(text, 60)).toBe(`${head}。`);
+  });
+
+  it("cuts after a CJK terminator below the clip pause floor", () => {
+    // 。 at index 32, max 60: accepted by the sentence path (end 33 ≥ 30) but
+    // below clip()'s pause fallback floor (36) — only the sentence path can
+    // produce this cut, so this pins the sentence-level mixed-script handling
+    const head = "中".repeat(32);
+    const text = `${head}。${"a".repeat(40)}`;
+    expect(clipSentence(text, 60)).toBe(`${head}。`);
+  });
+});
+
+describe("clip — CJK word boundaries (#106)", () => {
+  it("cuts at the last CJK pause punctuation instead of a hard char cut", () => {
+    const text = `${"中".repeat(40)}，${"文".repeat(40)}`;
+    expect(clip(text, 50)).toBe(`${"中".repeat(40)}，`);
+  });
+
+  it("falls back to a hard cut when no CJK pause punctuation is in the window", () => {
+    const text = "中".repeat(80);
+    expect(clip(text, 50)).toBe("中".repeat(50));
+  });
+
+  it("keeps English behavior: cut at the last space", () => {
+    expect(clip("alpha beta gamma", 10)).toBe("alpha beta");
+  });
+
+  it("keeps English behavior: hard cut when no space in the acceptable range", () => {
+    expect(clip("abcdefghij", 5)).toBe("abcde");
+  });
+
+  it("still avoids splitting a surrogate pair", () => {
+    const text = `${"a".repeat(9)}𠮷${"b".repeat(20)}`;
+    // CJK pause fallback finds no pause punctuation → end stays at max →
+    // the surrogate-pair guard must still step back
+    expect(clip(text, 10)).toBe("a".repeat(9));
   });
 });

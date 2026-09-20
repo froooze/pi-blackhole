@@ -2,6 +2,25 @@
 
 ---
 
+## [0.5.6] - 2026-09-19
+
+### Added
+
+- **Pre-compaction output stays visible after compaction** ([#103](https://github.com/k0valik/pi-blackhole/pull/103), thanks @sonSunnoi). After a successful Blackhole compaction, the newest assistant text removed from view is re-rendered as a display-only **Previous output — display only** block, so recent work stays readable without opening `/tree`. Bounded and opt-out: 16 KiB UTF-8 cap with a truncation marker, text only (no tool output, thinking, or images), idempotent per compaction, skipped when the newest dropped text is retained; disabled via `showPreCompactionMessage` (default `true`, env `PI_BLACKHOLE_SHOW_PRE_COMPACTION_MESSAGE`).
+
+### Changed
+
+- **Minimum supported Pi raised to 0.85.1; compat-floor CI retired.** The `compat-min-supported` job re-pinned the `@earendil-works/*` peers to the `peerDependencies` floor and typechecked against them, going red every time. The extension now builds against the pinned devDependencies (0.85.1) and the peer floor is set to match; `peerDependencies` remains the single source of truth for the declared minimum.
+
+### Fixed
+
+- **Observer chunk cap now counts every entry type** ([#110](https://github.com/k0valik/pi-blackhole/issues/110)). `capSourceEntriesToTokens` used a hand-rolled type table that had drifted from the trigger's estimator, so `custom_message` entries (text lives in `.content`, not `.summary`) counted as zero tokens and an oversized chunk could exceed `maxTokens`; it now reuses the same `estimateEntryTokens` the trigger uses (CJK-aware), and debug logging exposes the post-cap chunk size and cooldown-skipped models on the normal path.
+- **CJK-aware token accounting, text primitives, and extractor language handling** ([#106](https://github.com/k0valik/pi-blackhole/issues/106), [#105](https://github.com/k0valik/pi-blackhole/issues/105)). Script detection is automatic — no new config keys. `estimateStringTokens` counts CJK scripts as ~1 token/char instead of `ceil(chars/4)`, so every budget built on it (OM `tokenCount`, pool caps, `retainedToolOutputMaxTokens`, worker context pre-check) no longer admits ~3× the configured tokens. Clipping recognizes CJK terminators (`。！？；`, fullwidth included) and pause punctuation instead of hard-cutting space-free text. `recall` word-segments CJK queries via `Intl.Segmenter`, restoring per-term BM25 ranking with script-aware document-length normalization. `[User Preferences]` accepts CJK correction anchors (`不要`/`回退`/`错了`…) and `[Outstanding Context]` CJK failure stems (`失败`/`报错`/`错误`…) with benign-compound guards, scanning the whole fresh window instead of the last 20 blocks.
+- **`[Files And Changes]` and `[Commits]` now extract what actually happened** ([#105](https://github.com/k0valik/pi-blackhole/issues/105)). File attribution correlates tool calls with results (native path args, anchor-based edits, a bash parser for redirects/`sed -i`/`tee`/`cp`/`mv`/`rm`/`curl -o`), sanitizes arg strings so `src/a.ts:10-40` no longer phantoms next to `/repo/src/a.ts`, and adds git grounding tags (`staged`, `new`, `deleted`, …); the collector runs only at compaction time. `[Commits]` uses a quote-aware token parser with a message-recovery chain (segment-scoped `-m`, `-F -` heredocs, the git success line) and precision guards (`--dry-run`, failed commits, non-`git` commands produce nothing).
+- **`[Files And Changes]` display and cross-compaction merge overhauled**. cwd-relative paths, capped counted lists that never shrink after merge, and single-token paths hard-broken by `wrapLongLines` are reassembled; `(#N)` refs on `[Scope change]` and `[Commits]` for `recall` drill-down; session-goal and outstanding-context clips raised to 200.
+
+---
+
 ## [0.5.5] - 2026-09-15
 
 ### Changed

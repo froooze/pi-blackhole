@@ -1,11 +1,29 @@
 import type { Message } from "@earendil-works/pi-ai";
+import { hasCJK } from "./segment.js";
 import { PATH_KEYS } from "./tool-args.js";
+
+// CJK pause punctuation — clauses end with these and are NOT followed by
+// whitespace (#106). Used by clip's fallback for space-free text. (Sentence-
+// level terminators 。！？； are handled by clipSentence directly; this set
+// adds the pause level ，、：.)
+const CJK_PAUSE_GLOBAL_RE = /[。！？；，、：]/gu;
 
 export const clip = (text: string, max = 200): string => {
   if (text.length <= max) return text;
   // Try to cut at a word boundary
   const cut = text.lastIndexOf(" ", max);
   let end = cut > max * 0.6 ? cut : max;
+  // No usable space boundary (CJK text is space-free): fall back to the last
+  // CJK pause punctuation in the window instead of a hard character cut
+  if (end === max && hasCJK(text)) {
+    CJK_PAUSE_GLOBAL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    let pauseIdx = -1;
+    while ((m = CJK_PAUSE_GLOBAL_RE.exec(text)) !== null && m.index < max) {
+      if (m.index >= max * 0.6) pauseIdx = m.index;
+    }
+    if (pauseIdx >= 0) end = pauseIdx + 1;
+  }
   // Avoid splitting a surrogate pair
   if (end > 0 && end < text.length) {
     const code = text.charCodeAt(end - 1);
@@ -21,9 +39,14 @@ export const clip = (text: string, max = 200): string => {
  */
 export const clipSentence = (text: string, max = 200): string => {
   if (text.length <= max) return text;
-  // Look for sentence terminators followed by space/newline within [max*0.5, max]
+  // Sentence boundaries: ASCII terminators require whitespace/EOS after (so
+  // "3.14" and "file.ts" never cut); CJK terminators (。！？；) are boundaries
+  // wherever they appear — they never occur inside words/decimals/URLs, and
+  // CJK text follows them without whitespace (#106). Unconditional matching
+  // also covers mixed-script followers (。Hello, 。𠮷) a follower-class
+  // lookahead would miss. Within [max*0.5, max].
   const window = text.slice(0, max);
-  const matches = [...window.matchAll(/[.!?](?:\s|$)/g)];
+  const matches = [...window.matchAll(/[.!?](?:\s|$)|[。！？；]/g)];
   if (matches.length > 0) {
     const last = matches[matches.length - 1];
     const end = (last.index ?? 0) + 1; // include the punctuation
