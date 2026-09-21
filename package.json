@@ -79,7 +79,7 @@
       "oxfmt --no-error-on-unmatched-pattern"
     ]
   },
-  "packageManager": "pnpm@11.2.2",
+  "packageManager": "pnpm@11.27.1",
   "pi": {
     "extensions": [
       "./index.ts"
