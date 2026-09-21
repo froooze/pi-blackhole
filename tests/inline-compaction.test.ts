@@ -669,6 +669,61 @@ describe("Blackhole inline compaction adapter", () => {
     );
   });
 
+  it("accepts a compact() that repoints agent.state.messages through a helper", () => {
+    // Pi 0.87 moved the finalized-context repoint out of compact() into
+    // `_refreshFinalizedContext()`. The runtime contract is unchanged, so the
+    // guard must follow one call level instead of matching compact()'s text.
+    class HelperIndirectedSession {
+      agent = { state: { messages: [] as unknown[] } };
+      sessionManager = {
+        appendCompaction: (): void => {},
+        buildSessionContext: () => ({ messages: [] }),
+      };
+      _bindExtensionCore(): void {}
+      async abort(): Promise<void> {}
+      _refreshFinalizedContext(): void {
+        this.agent.state.messages = [];
+      }
+      async compact(): Promise<{ summary: string }> {
+        await this.abort();
+        this.sessionManager.appendCompaction();
+        this._refreshFinalizedContext();
+        return { summary: "helper-indirected" };
+      }
+    }
+
+    expect(
+      installInlineCompactionAdapter({ sessionClass: HelperIndirectedSession as never }),
+    ).toEqual({ supported: true });
+  });
+
+  it("rejects a compact() whose helper only reads agent.state.messages", () => {
+    // Guards the helper follow-up from degenerating into "accept this method
+    // name": a helper that never assigns the finalized context stays unsupported.
+    class ReadOnlyHelperSession {
+      agent = { state: { messages: [] as unknown[] } };
+      sessionManager = {
+        appendCompaction: (): void => {},
+        buildSessionContext: () => ({ messages: [] }),
+      };
+      _bindExtensionCore(): void {}
+      async abort(): Promise<void> {}
+      _refreshFinalizedContext(): unknown {
+        return this.agent.state.messages;
+      }
+      async compact(): Promise<{ summary: string }> {
+        await this.abort();
+        this.sessionManager.appendCompaction();
+        this._refreshFinalizedContext();
+        return { summary: "read-only-helper" };
+      }
+    }
+
+    const status = installInlineCompactionAdapter({ sessionClass: ReadOnlyHelperSession as never });
+    expect(status.supported).toBe(false);
+    expect(status.reason).toContain("unsupported AgentSession.compact() shape");
+  });
+
   it("parses Windows native host stack paths", () => {
     const windowsPath = String.raw`C:\Users\maple\node_modules\@earendil-works\pi-coding-agent\dist\runner.js`;
 
