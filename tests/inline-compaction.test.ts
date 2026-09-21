@@ -724,6 +724,71 @@ describe("Blackhole inline compaction adapter", () => {
     expect(status.reason).toContain("unsupported AgentSession.compact() shape");
   });
 
+  it("rejects a compact() whose repointing helper is inherited from a base class", () => {
+    // Only the session class's own prototype describes *this* class's compact
+    // contract. An inherited helper is not part of it, so the guard fails closed
+    // instead of trusting a prototype-chain hit.
+    class BaseSession {
+      agent = { state: { messages: [] as unknown[] } };
+      sessionManager = {
+        appendCompaction: (): void => {},
+        buildSessionContext: () => ({ messages: [] }),
+      };
+      _bindExtensionCore(): void {}
+      async abort(): Promise<void> {}
+      _refreshFinalizedContext(): void {
+        this.agent.state.messages = [];
+      }
+    }
+
+    class InheritedHelperSession extends BaseSession {
+      async compact(): Promise<{ summary: string }> {
+        await this.abort();
+        this.sessionManager.appendCompaction();
+        this._refreshFinalizedContext();
+        return { summary: "inherited-helper" };
+      }
+    }
+
+    const status = installInlineCompactionAdapter({
+      sessionClass: InheritedHelperSession as never,
+    });
+    expect(status.supported).toBe(false);
+    expect(status.reason).toContain("unsupported AgentSession.compact() shape");
+  });
+
+  it("rejects an assignment reached only through the helper's own nested call", () => {
+    // The accepted indirection is exactly one call level: compact() -> helper.
+    // A helper that itself delegates further must not widen the guard.
+    class NestedHelperSession {
+      agent = { state: { messages: [] as unknown[] } };
+      sessionManager = {
+        appendCompaction: (): void => {},
+        buildSessionContext: () => ({ messages: [] }),
+      };
+      _bindExtensionCore(): void {}
+      async abort(): Promise<void> {}
+      _repointContext(): void {
+        this.applyContext();
+      }
+      applyContext(): void {
+        this.agent.state.messages = [];
+      }
+      async compact(): Promise<{ summary: string }> {
+        await this.abort();
+        this.sessionManager.appendCompaction();
+        this._repointContext();
+        return { summary: "nested-helper" };
+      }
+    }
+
+    const status = installInlineCompactionAdapter({
+      sessionClass: NestedHelperSession as never,
+    });
+    expect(status.supported).toBe(false);
+    expect(status.reason).toContain("unsupported AgentSession.compact() shape");
+  });
+
   it("parses Windows native host stack paths", () => {
     const windowsPath = String.raw`C:\Users\maple\node_modules\@earendil-works\pi-coding-agent\dist\runner.js`;
 
