@@ -21,8 +21,9 @@ import {
   isStaleExtensionContextError,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
-import { estimateEntryTokens } from "./tokens.js";
+import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
+import { OBSERVER_SYSTEM } from "./agents/observer/prompts.js";
 
 /** Fixed overhead for system prompt, tool definitions, and turn scaffold in context window pre-check. */
 const AGENT_LOOP_RESERVE = 8_000;
@@ -61,6 +62,7 @@ import {
   reflectionToSummaryLine,
   reflectionsCreatedAfterIndex,
   selectPriorObservations,
+  selectPriorReflections,
   type Entry,
   type Observation,
   type Reflection,
@@ -695,14 +697,23 @@ export async function runObserverStage(
   const capTokens = chunkEntries.reduce((s: number, e) => s + estimateEntryTokens(e), 0);
 
   const memory = fullProjection(entries);
-  let priorReflections = memory.reflections.map(reflectionToSummaryLine);
-  let priorObservations = memory.observations.map(observationToSummaryLine);
 
-  // In manual mode, append accumulated batch history to whatever
-  // fullProjection found in the branch (preserving pre-switch markers
-  // when transitioning from autoCompact to manual mode mid-session).
   // The preamble is capped via observerPreambleMaxTokens so accumulated
-  // observations don't grow unbounded across turns.
+  // memory doesn't grow unbounded across turns. Each section gets up to the
+  // full budget: observations relevance-ranked, reflections newest-first.
+  // In manual mode, append accumulated batch history to whatever
+  // fullProjection found in the branch (preserving pre-switch markers when
+  // transitioning from autoCompact to manual mode mid-session).
+  const preambleMaxTokens =
+    runtime.config.observerPreambleMaxTokens > 0
+      ? runtime.config.observerPreambleMaxTokens
+      : Math.round(runtime.config.observerChunkMaxTokens * 0.3);
+  let priorReflections = selectPriorReflections(memory.reflections, preambleMaxTokens).map(
+    reflectionToSummaryLine,
+  );
+  let priorObservations = selectPriorObservations(memory.observations, preambleMaxTokens).map(
+    observationToSummaryLine,
+  );
   if (isManualMode(runtime.config)) {
     const pendingCtx = readPendingState(sessionId);
     const accumulatedReflections = (pendingCtx.reflectionBatches ?? []).flatMap(
@@ -712,22 +723,25 @@ export async function runObserverStage(
       (b) => (b.data as any).observations ?? [],
     );
 
-    // Capped preamble: high always kept, medium/low scored by relevance + recency
-    const preambleMaxTokens =
-      runtime.config.observerPreambleMaxTokens > 0
-        ? runtime.config.observerPreambleMaxTokens
-        : Math.round(runtime.config.observerChunkMaxTokens * 0.3);
     const allObservations = [...memory.observations, ...accumulatedObservations];
     priorObservations = selectPriorObservations(allObservations, preambleMaxTokens).map(
       observationToSummaryLine,
     );
 
-    // Reflections are never trimmed — rare and always kept
-    priorReflections = [
-      ...priorReflections,
-      ...accumulatedReflections.map(reflectionToSummaryLine),
-    ];
+    const allReflections = [...memory.reflections, ...accumulatedReflections];
+    priorReflections = selectPriorReflections(allReflections, preambleMaxTokens).map(
+      reflectionToSummaryLine,
+    );
   }
+
+  // Attempt-invariant prompt overhead, measured once: the rendered preamble
+  // plus the observer system prompt. The per-model context guard below must
+  // price the real prompt — a chunk-only estimate goes blind once accumulated
+  // memory grows and every attempt 400s instead of skipping cleanly.
+  const preambleTokens = estimateStringTokens(
+    [...priorReflections, ...priorObservations].join("\n"),
+  );
+  const observerSystemTokens = estimateStringTokens(OBSERVER_SYSTEM);
 
   // If manual mode: skip if this exact chunk was already processed
   if (isManualMode(runtime.config) && isObservationChunkPending(sessionId, coversUpToId)) {
@@ -758,6 +772,7 @@ export async function runObserverStage(
       maxChunkTokens,
       chunkTokens,
       capTokens,
+      preambleTokens,
       coversUpToId,
       sourceEntryIds,
       sourceEntryCount: sourceEntryIds.length,
@@ -775,13 +790,20 @@ export async function runObserverStage(
       stageFallbacks: stageFallbackModels(runtime, "observer"),
     });
 
-    // Check if estimated input fits in model's context window
-    // Use actual chunk tokens (already computed) instead of the configured cap
+    // Check if the full estimated prompt fits in the model's context window:
+    // chunk + rendered preamble + system prompt, plus the agent-loop reserve
+    // for tool definitions and turn scaffold. (The reserve also names the
+    // system prompt, so this slightly over-counts — safe direction for a
+    // pre-flight guard.)
     const effectiveObsCtx = effectiveContextWindow(resolved.model as any, stageModelForThinking);
-    const observerEstimatedInput = chunkTokens + AGENT_LOOP_RESERVE;
+    const observerEstimatedInput =
+      chunkTokens + preambleTokens + observerSystemTokens + AGENT_LOOP_RESERVE;
     if (observerEstimatedInput > effectiveObsCtx) {
       debugLog("observer.context_window_exceeded", {
         estimatedInput: observerEstimatedInput,
+        chunkTokens,
+        preambleTokens,
+        systemTokens: observerSystemTokens,
         effectiveCtx: effectiveObsCtx,
         model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
       });

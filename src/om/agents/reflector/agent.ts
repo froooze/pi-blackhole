@@ -5,13 +5,9 @@
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
  * and throws if the API errored without collecting any tool results.
  */
-import {
-  agentLoop,
-  type AgentContext,
-  type AgentLoopConfig,
-  type AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { buildAgentContext } from "../agent-context.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -174,11 +170,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
       timestamp: Date.now(),
     },
   ];
-  const context: AgentContext = {
-    systemPrompt: REFLECTOR_SYSTEM,
-    messages: [],
-    tools: [recordReflections as AgentTool<any>],
-  };
+  const context = buildAgentContext(REFLECTOR_SYSTEM, [recordReflections as AgentTool<any>]);
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;

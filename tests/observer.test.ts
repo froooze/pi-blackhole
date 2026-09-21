@@ -13,6 +13,7 @@ import {
   runObserver,
 } from "../src/om/agents/observer/agent.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
+import { leadingSystemPrompt } from "./fixtures/agent-context.js";
 
 function fakeAgentLoop(
   handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
@@ -68,7 +69,7 @@ describe("runObserver", () => {
   it("keeps core observer prompt rules", async () => {
     let systemPrompt = "";
     const loop = fakeAgentLoop((_prompts, context) => {
-      systemPrompt = context.systemPrompt;
+      systemPrompt = leadingSystemPrompt(context);
     });
 
     await runObserver({ ...baseArgs, agentLoop: loop });
