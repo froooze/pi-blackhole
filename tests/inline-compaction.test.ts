@@ -803,6 +803,55 @@ describe("Blackhole inline compaction adapter", () => {
     },
   );
 
+  it.each(["missing", "outside package"])(
+    "still scans direct imports when the createRequire bootstrap target is %s",
+    async (kind) => {
+      const fixtureRoot = await mkdtemp(join(tmpdir(), "blackhole-bootstrap-rescan-"));
+      const packageRoot = join(fixtureRoot, "node_modules", "@earendil-works", "pi-coding-agent");
+      const dist = join(packageRoot, "dist");
+      const chunks = join(dist, "bundle", "chunks");
+      const cli = join(dist, "bundle", "cli.js");
+      const runtimeChunk = join(chunks, "runtime.js");
+      try {
+        await mkdir(chunks, { recursive: true });
+        await writeFile(join(packageRoot, "package.json"), HOST_MANIFEST);
+        await writeFile(join(dist, "index.js"), hostSessionSource("barrel-fallback"));
+        await writeFile(
+          runtimeChunk,
+          `${hostSessionSource("direct-import")}\nexport function main() {}\n`,
+        );
+        if (kind === "outside package") {
+          await writeFile(
+            join(packageRoot, "..", "foreign-runtime.js"),
+            'import { main } from "./pi-coding-agent/dist/bundle/chunks/runtime.js"; main();\n',
+          );
+        }
+        const specifier = kind === "missing" ? "./missing.js" : "../../../foreign-runtime.js";
+        // A launcher that carries both a broken bootstrap and a usable direct
+        // import: an unusable bootstrap must not discard the direct candidate.
+        await writeFile(
+          cli,
+          `import { createRequire } from "node:module";\ncreateRequire(import.meta.url)(${JSON.stringify(specifier)});\nimport{main}from"./chunks/runtime.js";main();\n`,
+        );
+        const bundled = (await import(pathToFileURL(runtimeChunk).href)) as {
+          AgentSession: FixtureSessionClass;
+        };
+        const originalBind = bundled.AgentSession.prototype._bindExtensionCore;
+        await expect(
+          installHostInlineCompactionAdapter({ entrypoint: cli, stack: "" }),
+        ).resolves.toEqual({ supported: true });
+        expect(bundled.AgentSession.prototype._bindExtensionCore).not.toBe(originalBind);
+        const session = new bundled.AgentSession();
+        session._bindExtensionCore({});
+        await expect(compactInlineAtTurnBoundary(session.sessionManager)).resolves.toMatchObject({
+          summary: "direct-import",
+        });
+      } finally {
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("falls back to a root's dist barrel when its fast candidate lacks AgentSession", async () => {
     const fixtureRoot = await mkdtemp(join(tmpdir(), "blackhole-unbundled-host-"));
     const packageRoot = join(fixtureRoot, "node_modules", "@earendil-works", "pi-coding-agent");

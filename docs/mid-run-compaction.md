@@ -4,7 +4,7 @@ How Blackhole keeps auto-compaction working during (not just after) agent runs �
 
 Audience: users configuring `midRunCompaction`, extension authors running subagents, and anyone reading a `debug.ndjson` full of `compaction_trigger.*` events.
 
-> **Last verified:** 2026-09-17 against repo rev `4e71dda` (`fix/92-headless-inline`) and pi `@earendil-works/pi-coding-agent` 0.85.1. House rule: any claim of the form "Pi does not expose X" in `docs/` must cite the pi version it was checked against — re-check the vendored pi type surface before repeating one.
+> **Last verified:** 2026-09-21 against repo rev `5783f08` and pi `@earendil-works/pi-coding-agent` 0.85.1; bundled-host discovery re-checked against 0.86.1 and 0.87.0 (see the fail-closed shapes note for the 0.87 gap). House rule: any claim of the form "Pi does not expose X" in `docs/` must cite the pi version it was checked against — re-check the vendored pi type surface before repeating one.
 
 See also: [[CONFIG.md]] (`midRunCompaction` reference), [[vcc-compaction.md]] (the summary pipeline itself), [[APPEND_COMPACTION.md]] (append-mode summary chains), [[observational-memory.md]] (the OM pipeline that shares the runtime).
 
@@ -51,7 +51,7 @@ Entry points: [[src/om/inline-compaction.ts]] (`compactInlineAtTurnBoundary`, `i
 - **Per-host helper binding**: each discovered host binds its own `prepareCompaction`; a session never borrows another host's helper for eligibility checks.
 - **Quiesce suppression with a verified invariant**: during the inline attempt, the session's `abort` (and `disconnect` on older shapes) is intercepted and suppressed; if the compaction internals did not invoke the expected hooks, the attempt **throws instead of proceeding** — no half-suppressed state.
 - **Boundary validation**: unpaired tool calls in the active branch abort/reject the attempt before any mutation; completed tool calls must stay paired for provider replay.
-- **Fail-closed shapes**: only known Pi compact shapes (0.81 legacy, 0.84 connected-listener) are recognized. Internal drift → `InlineCompactionUnavailableError`, the current run stays alive, and the mode degrades (see matrix below). It never falls back to the abort + `blackhole-resume` path.
+- **Fail-closed shapes**: only known Pi compact shapes are recognized — `compact()` must call `this.abort()` exactly once, reference `appendCompaction`, and repoint `agent.state.messages` at the finalized context (0.81 legacy, 0.84 connected-listener, 0.85/0.86). Internal drift → `InlineCompactionUnavailableError`, the current run stays alive, and the mode degrades (see matrix below). It never falls back to the abort + `blackhole-resume` path. **Known gap:** pi 0.87.0 moved the `agent.state.messages` write out of `compact()` into a `_refreshFinalizedContext()` helper, which this guard rejects even though the other hooks and the runtime contract are unchanged ([#117](https://github.com/k0valik/pi-blackhole/issues/117)); `@earendil-works/*` is pinned below 0.87 until it follows.
 - **Eligibility**: before any mid-run attempt, `isCompactionEligible` consults the host's `prepareCompaction` with the session's effective compaction settings (`enabled`, `reserveTokens`, `keepRecentTokens`). Ineligible (e.g. "Nothing to compact (session too small)" territory) → skip, no LLM call, no backoff ([#86](https://github.com/k0valik/pi-blackhole/pull/86)).
 
 ## Config matrix

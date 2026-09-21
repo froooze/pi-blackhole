@@ -1,9 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- **Pi 0.87 is held out of the automatic dependency bump.** `0.87.0` moved the `agent.state.messages` repoint inside `AgentSession.compact()` into a new `_refreshFinalizedContext()` helper, so Blackhole's compact-shape guard no longer recognizes the class and mid-run inline compaction fails closed on 0.87 ([#117](https://github.com/k0valik/pi-blackhole/issues/117)). Dependabot now ignores `@earendil-works/*` `>=0.87.0` so the toolchain settles on 0.86.x until the shape detector follows. `peerDependencies` (`>=0.85.1 <1.0.0`) is unchanged: on 0.87 the opt-in `resume` mode skips mid-run compaction with a one-time warning instead of breaking, and default `off` configs are unaffected.
+- **CI runs on pull requests targeting `dev` too.** `ci.yml` previously triggered only for `pull_request → main`, so PRs merged into the working branch were gated by bot reviews alone. The full gate (build → typecheck → lint → test → format:check) now covers both branches.
+
 ### Fixed
 
-- **Discover Pi 0.86's bundled host behind its `createRequire` launcher.** Follow the same-package bootstrap file without executing it before locating the runtime chunk, so inline compaction captures the active `AgentSession` instead of patching the unused modular class and falling back to settled compaction.
-
+- **Discover Pi 0.86's bundled host behind its `createRequire` launcher.** Follow the same-package bootstrap file without executing it before locating the runtime chunk, so inline compaction captures the active `AgentSession` instead of patching the unused modular class and falling back to settled compaction. A bootstrap target that is missing, unreadable, or outside the Pi package now leaves the launcher's own source in place, so the direct-import scan still runs instead of being skipped.
 - **Observer preamble cap now applies in auto/off compaction modes.** `observerPreambleMaxTokens` was previously only enforced in manual mode, so auto-mode observer prompts could grow without bound even though the main session prompt stayed capped by `observationsPoolMaxTokens`; the observer now applies the same relevance-ranked selection budget in all modes, defaulting to 30% of `observerChunkMaxTokens` when unset.
 - **Observer preamble cap now covers reflections, and the context guard prices the full prompt.** Reflections were never trimmed (no drop entry type exists for them), leaving a permanently growing floor on the observer preamble; each preamble section is now capped at `observerPreambleMaxTokens` (reflections newest-first). The pre-flight `observer.context_window_exceeded` guard previously measured only `chunkTokens + 8000`, so oversized prompts sailed through and failed every attempt with a provider 400; it now accounts for the rendered preamble and the observer system prompt, skipping the model cleanly instead.
 

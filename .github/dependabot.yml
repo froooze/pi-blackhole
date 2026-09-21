@@ -13,6 +13,19 @@ updates:
     # and an unattended bump breaks `pnpm lint` (see AGENTS.md).
     ignore:
       - dependency-name: "typescript"
+      # pi 0.87 moved the `agent.state.messages` repoint in AgentSession.compact()
+      # into `_refreshFinalizedContext()`, which our compact-shape guard does not
+      # recognize yet: mid-run inline compaction fails closed on 0.87 (issue #117).
+      # Hold the whole @earendil-works set so the group stays on 0.86.x (verified
+      # to discover and capture the bundled host) until the shape fix lands.
+      - dependency-name: "@earendil-works/pi-coding-agent"
+        versions: [">=0.87.0"]
+      - dependency-name: "@earendil-works/pi-agent-core"
+        versions: [">=0.87.0"]
+      - dependency-name: "@earendil-works/pi-ai"
+        versions: [">=0.87.0"]
+      - dependency-name: "@earendil-works/pi-tui"
+        versions: [">=0.87.0"]
     # Match the local 48h pnpm minimumReleaseAge maturity gate (see ci-pkg
     # skill): dependabot must not open PRs carrying packages younger than
     # 48h, or `pnpm install` fails ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION
