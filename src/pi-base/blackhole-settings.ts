@@ -351,6 +351,15 @@ export const config = new ConfigManager<UnifiedConfig>({
       value: cfg.fullFoldAlways,
     },
 
+    // ── UI ──
+    {
+      key: "statusBar",
+      type: "boolean",
+      label: "Footer status bar",
+      description: "Show token gauges (O/P/X) and worker events in the footer",
+      value: cfg.statusBar,
+    },
+
     // ── Debug ──
     {
       key: "debug",

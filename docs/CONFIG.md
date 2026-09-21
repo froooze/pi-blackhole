@@ -47,6 +47,7 @@ The config file must contain **valid JSON**. A trailing comma, partial write, or
   "memory": true,                 // Enable OM workers + content injection
   "sessionFallback": true,        // Fall back to session model when OM models fail
   "fullFoldAlways": true,         // Treat first compaction as full-fold boundary
+  "statusBar": true,              // Footer token gauges (O/P/X) + worker events
   "observeAfterTokens": 15000,    // Token threshold for observer runs
   "reflectAfterTokens": 25000,    // Token threshold for reflector + dropper
   "observationsPoolMaxTokens": 20000, // Full-fold pressure + rendered observation-line cap
@@ -558,6 +559,16 @@ Each model config supports the following fields:
 }
 ```
 
+## UI Section
+
+### `statusBar`
+
+Show the footer status bar: three token gauges — O (transcript since last observer run), P (observation pool fill), X (context since last compaction) — plus worker spinners and `✓ +N` completion events.
+
+| Type | Default |
+|------|---------|
+| boolean | `true` |
+
 ## Debug Section
 
 ### `debug` / `debugLog`
@@ -614,6 +625,7 @@ Boolean fields:
 | `PI_BLACKHOLE_DEBUG_LOG` | `debugLog` (JSONL logging) |
 | `PI_BLACKHOLE_SESSION_FALLBACK` | `sessionFallback` |
 | `PI_BLACKHOLE_FULL_FOLD_ALWAYS` | `fullFoldAlways` |
+| `PI_BLACKHOLE_STATUSBAR` | `statusBar` |
 
 Integer fields (invalid values fall back; `reflectionsPoolMaxTokens` also accepts `0` to disable its cap):
 

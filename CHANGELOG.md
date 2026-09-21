@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- **Footer status bar.** pi-blackhole now shows live state in the pi footer (config key `statusBar`, default on; env `PI_BLACKHOLE_STATUSBAR`): three token gauges — O (transcript since the last observer run), P (observation pool fill), X (context since the last compaction) — plus worker spinners, `✓ +N` completion events, and compaction notes with their trigger reason. Gauges color by fill: dim under 80%, theme warning color from 80%, theme error color at 100%. The bar reads in-process state (`runtime.config`, `model-budget.ts`, `ledger/progress.ts`, `runtime.consolidationPhase`), so its numbers match `/blackhole-memory` status; it adds no file polling and no threshold guessing, only a 1-second in-process poll of the runtime state. If you ran the standalone `blackhole-status.ts` footer extension before, remove it: two writers on the same `setStatus` key race.
+
 ### Changed
 
 - **Pi 0.87 is held out of the automatic dependency bump.** `0.87.0` moved the `agent.state.messages` repoint inside `AgentSession.compact()` into a new `_refreshFinalizedContext()` helper, so Blackhole's compact-shape guard no longer recognizes the class and mid-run inline compaction fails closed on 0.87 ([#117](https://github.com/k0valik/pi-blackhole/issues/117)). Dependabot now ignores `@earendil-works/*` `>=0.87.0` so the toolchain settles on 0.86.x until the shape detector follows. `peerDependencies` (`>=0.85.1 <1.0.0`) is unchanged: on 0.87 the opt-in `resume` mode skips mid-run compaction with a one-time warning instead of breaking, and default `off` configs are unaffected.

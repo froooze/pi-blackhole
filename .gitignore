@@ -25,3 +25,5 @@ tmp/
 *:Zone.Identifier
 
 .agent/
+# vitest json reporter output (local runs only)
+.vitest/

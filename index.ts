@@ -18,6 +18,7 @@ import { registerVccRecallCommand } from "./src/commands/vcc-recall";
 import { registerBlackholeExportCommand } from "./src/commands/blackhole-export";
 import { registerConsolidationTrigger } from "./src/om/consolidation.js";
 import { registerCompactionTrigger } from "./src/om/compaction-trigger.js";
+import { registerStatusBar } from "./src/om/status-bar.js";
 import { registerRecallTool } from "./src/tools/recall";
 import { Runtime } from "./src/om/runtime.js";
 import { captureRegisteredProviderStreams } from "./src/om/provider-stream.js";
@@ -76,6 +77,7 @@ export default async (pi: ExtensionAPI) => {
   // Observational memory: background consolidation pipeline
   registerConsolidationTrigger(pi, omRuntime); // agent_start + turn_end → observer/reflector/dropper
   registerCompactionTrigger(pi, omRuntime); // turn_end + agent_end → auto-compaction
+  registerStatusBar(pi, omRuntime); // footer gauges (O/P/X) + worker events (config.statusBar)
 
   // Pi-vcc: compaction + om injection
   registerBeforeCompactHook(pi, omRuntime); // session_before_compact → pi-vcc + om content
