@@ -1559,7 +1559,7 @@ describe("Eligibility guard (proactive auto-compaction Nothing to compact / sess
     {
       type: "message",
       id: "small-assistant-2",
-      parentId: null,
+      parentId: "small-user-1",
       timestamp: "2026-05-02T10:00:00.000Z",
       message: {
         role: "assistant",
@@ -1570,12 +1570,15 @@ describe("Eligibility guard (proactive auto-compaction Nothing to compact / sess
   ];
 
   function makeLargeBranch(): TestEntry[] {
+    // Pi 0.87's prepareCompaction walks the parent chain from the newest entry
+    // (buildSessionProjection), so fixtures must form a real chain or the
+    // projection is a single entry and every session reads as ineligible.
     const branch: TestEntry[] = [];
     for (let i = 0; i < 8; i++) {
       branch.push({
         type: "message",
         id: `large-msg-${i}`,
-        parentId: null,
+        parentId: i === 0 ? null : `large-msg-${i - 1}`,
         timestamp: "2026-05-02T10:00:00.000Z",
         message: {
           role: i % 2 === 0 ? "user" : "assistant",

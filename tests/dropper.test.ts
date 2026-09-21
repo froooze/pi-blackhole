@@ -18,6 +18,7 @@ import {
   selectDropCandidates,
 } from "../src/om/agents/dropper/agent.js";
 import { observation, reflection } from "./fixtures/session.js";
+import { leadingSystemPrompt } from "./fixtures/agent-context.js";
 
 function fakeAgentLoop(
   handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
@@ -94,7 +95,7 @@ describe("V3 dropper agent", () => {
   it("keeps core dropper safety guidance in V3 terms", async () => {
     let systemPrompt = "";
     const loop = fakeAgentLoop((_prompts, context) => {
-      systemPrompt = context.systemPrompt;
+      systemPrompt = leadingSystemPrompt(context);
     });
 
     await runDropper({ ...baseArgs, agentLoop: loop });

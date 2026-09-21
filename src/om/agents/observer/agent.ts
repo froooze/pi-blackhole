@@ -6,13 +6,9 @@
  * and throws if the API errored without collecting any tool results.
  * This allows the consolidation pipeline to fall back to alternative models.
  */
-import {
-  agentLoop,
-  type AgentContext,
-  type AgentLoopConfig,
-  type AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { buildAgentContext } from "../agent-context.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -255,11 +251,7 @@ ${conversation}`;
     },
   ];
 
-  const context: AgentContext = {
-    systemPrompt: OBSERVER_SYSTEM,
-    messages: [],
-    tools: [recordObservations as AgentTool<any>],
-  };
+  const context = buildAgentContext(OBSERVER_SYSTEM, [recordObservations as AgentTool<any>]);
 
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";

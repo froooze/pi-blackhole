@@ -181,6 +181,21 @@ describe("selectOmittedAssistantText", () => {
     ).toEqual({ entryId: "a1", text: "real output" });
   });
 
+  it("skips message entries whose message is not an object", () => {
+    const malformed: Entry[] = [
+      compactionEntry("c1"),
+      { type: "message", id: "bad", message: null },
+      assistantMessage("a1", [textBlock("real output")]),
+    ];
+    expect(
+      selectOmittedAssistantText({
+        branch: malformed,
+        retainedIds: new Set(["c1"]),
+        compactionEntryId: "c1",
+      }),
+    ).toEqual({ entryId: "a1", text: "real output" });
+  });
+
   it("returns undefined when the compaction entry is absent from the branch", () => {
     expect(
       selectOmittedAssistantText({

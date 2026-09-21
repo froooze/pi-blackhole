@@ -5,13 +5,9 @@
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
  * and throws if the API errored without collecting any drop candidates.
  */
-import {
-  agentLoop,
-  type AgentContext,
-  type AgentLoopConfig,
-  type AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { buildAgentContext } from "../agent-context.js";
 import {
   createBridgeStreamFn,
   createProviderFetch,
@@ -346,11 +342,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
       timestamp: Date.now(),
     },
   ];
-  const context: AgentContext = {
-    systemPrompt: DROPPER_SYSTEM,
-    messages: [],
-    tools: [dropObservations as AgentTool<any>],
-  };
+  const context = buildAgentContext(DROPPER_SYSTEM, [dropObservations as AgentTool<any>]);
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
