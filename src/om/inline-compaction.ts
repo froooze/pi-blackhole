@@ -311,6 +311,32 @@ function countMethodCalls(source: string, method: string): number {
   return source.match(pattern)?.length ?? 0;
 }
 
+const AGENT_MESSAGES_ASSIGN = /\bagent\.state\.messages\s*=/;
+
+/**
+ * `compact()` must repoint the agent at the finalized context. Pi 0.87 moved
+ * that write into a helper (`_refreshFinalizedContext()`), so accept an
+ * assignment found one call level deep in a method defined on the session
+ * class's own prototype; a missing, inherited, or non-assigning helper still
+ * fails closed.
+ */
+function assignsAgentMessages(source: string, prototype: PatchableSessionPrototype): boolean {
+  if (AGENT_MESSAGES_ASSIGN.test(source)) return true;
+  for (const match of source.matchAll(/\bthis\.([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = match[1];
+    const method: unknown = Object.getOwnPropertyDescriptor(prototype, name)?.value;
+    if (typeof method !== "function") continue;
+    const methodSource = maskNonCodeText(Function.prototype.toString.call(method));
+    if (AGENT_MESSAGES_ASSIGN.test(methodSource)) return true;
+  }
+  return false;
+}
+
+/**
+ * Detect which known Pi `AgentSession.compact()` contract this prototype
+ * implements. Returns the shape, or a human-readable reason the class is
+ * unsupported so callers can report why inline compaction degrades.
+ */
 function detectCompactShape(prototype: PatchableSessionPrototype): CompactShape | string {
   if (typeof prototype.compact !== "function") {
     return "AgentSession.compact() is missing";
@@ -327,7 +353,7 @@ function detectCompactShape(prototype: PatchableSessionPrototype): CompactShape 
   if (
     abortCalls !== 1 ||
     !source.includes("appendCompaction") ||
-    !source.includes("agent.state.messages")
+    !assignsAgentMessages(source, prototype)
   ) {
     return "unsupported AgentSession.compact() shape";
   }
