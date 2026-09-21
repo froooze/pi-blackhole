@@ -12,6 +12,7 @@
 
 - **Pi 0.87 is supported.** The `@earendil-works/*` devDependencies move to `0.87.0` in lockstep and the dependabot `>=0.87.0` hold is removed ([#118](https://github.com/k0valik/pi-blackhole/issues/118)). `peerDependencies` (`>=0.85.1 <1.0.0`) is unchanged: the observational-memory system-prompt carrier is probed at runtime, so consolidation keeps its prompt on 0.85/0.86 (legacy `AgentContext.systemPrompt`) and 0.87+ (leading transcript system message) — see Fixed.
 - **CI runs on pull requests targeting `dev` too.** `ci.yml` previously triggered only for `pull_request → main`, so PRs merged into the working branch were gated by bot reviews alone. The full gate (build → typecheck → lint → test → format:check) now covers both branches.
+- **Installs work under pnpm's built-in minimum-release-age policy.** pnpm 11 enforces a 24-hour minimum release age by default, which rejected the brand-new `@earendil-works/*@0.87.0` set. The toolchain pin moves to `pnpm@11.27.1` and those versions are listed in `minimumReleaseAgeExclude` (the previous pin, `11.2.2`, ignored that list), so `pnpm install --frozen-lockfile`, CI, and git-based extension installs no longer wait out the window.
 
 ### Fixed
 

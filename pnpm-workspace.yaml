@@ -14,6 +14,12 @@ minimumReleaseAgeExclude:
   - "@earendil-works/pi-telemetry@0.84.0"
   - "@earendil-works/pi-tui@0.84.0"
   - "grok-mermaid@0.2.2"
+  - "@earendil-works/chord@0.87.0"
+  - "@earendil-works/pi-agent-core@0.87.0"
+  - "@earendil-works/pi-ai@0.87.0"
+  - "@earendil-works/pi-coding-agent@0.87.0"
+  - "@earendil-works/pi-telemetry@0.87.0"
+  - "@earendil-works/pi-tui@0.87.0"
 
 overrides:
   vite: 8.0.16
