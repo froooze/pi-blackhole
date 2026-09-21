@@ -459,7 +459,7 @@ Max source-entry tokens sent to the observer per chunk.
 
 ### `observerPreambleMaxTokens`
 
-Max preamble tokens (`CURRENT REFLECTIONS` / `OBSERVATIONS`) in the observer prompt. Default `0` means auto-compute from `observerChunkMaxTokens` (30%). Applied in both auto/manual compaction modes so the observer prompt does not grow without bound as the session accumulates observations.
+Max preamble tokens per section (`CURRENT REFLECTIONS` / `CURRENT OBSERVATIONS`) in the observer prompt. Default `0` means auto-compute from `observerChunkMaxTokens` (30%). Applied in both auto/manual compaction modes so the observer prompt does not grow without bound as the session accumulates memory: observations are relevance-ranked, reflections newest-first. The pre-flight context guard prices the full prompt (chunk + rendered preamble + system prompt), so an oversized prompt skips the model cleanly instead of failing every attempt with a provider 400.
 
 | Type | Default |
 |------|---------|

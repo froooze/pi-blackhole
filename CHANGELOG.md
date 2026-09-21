@@ -3,6 +3,7 @@
 ### Fixed
 
 - **Observer preamble cap now applies in auto/off compaction modes.** `observerPreambleMaxTokens` was previously only enforced in manual mode, so auto-mode observer prompts could grow without bound even though the main session prompt stayed capped by `observationsPoolMaxTokens`; the observer now applies the same relevance-ranked selection budget in all modes, defaulting to 30% of `observerChunkMaxTokens` when unset.
+- **Observer preamble cap now covers reflections, and the context guard prices the full prompt.** Reflections were never trimmed (no drop entry type exists for them), leaving a permanently growing floor on the observer preamble; each preamble section is now capped at `observerPreambleMaxTokens` (reflections newest-first). The pre-flight `observer.context_window_exceeded` guard previously measured only `chunkTokens + 8000`, so oversized prompts sailed through and failed every attempt with a provider 400; it now accounts for the rendered preamble and the observer system prompt, skipping the model cleanly instead.
 
 ---
 

@@ -240,7 +240,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
               ? ""
               : ` (30% of ${runtime.config.observerChunkMaxTokens.toLocaleString()} chunk)`;
           lines.push(
-            `Preamble cap: ${preambleCap.toLocaleString()} tokens for observations${pctNote}`,
+            `Preamble cap: ${preambleCap.toLocaleString()} tokens per section (observations, reflections)${pctNote}`,
           );
           lines.push("Run /blackhole to flush and compact.");
         }
