@@ -16,6 +16,7 @@ import {
 import { hashId } from "../src/om/ids.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
 import { observation, reflection } from "./fixtures/session.js";
+import { leadingSystemPrompt } from "./fixtures/agent-context.js";
 
 function fakeAgentLoop(
   handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
@@ -42,7 +43,7 @@ describe("V3 reflector agent", () => {
   it("keeps core reflector prompt guidance in V3 terms", async () => {
     let systemPrompt = "";
     const loop = fakeAgentLoop((_prompts, context) => {
-      systemPrompt = context.systemPrompt;
+      systemPrompt = leadingSystemPrompt(context);
     });
 
     await runReflector({ ...baseArgs, agentLoop: loop });

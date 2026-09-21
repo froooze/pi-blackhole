@@ -13,6 +13,8 @@ vi.mock("../src/om/clipboard.js", () => ({
 import { registerMemoryCommand } from "../src/commands/memory.js";
 import { copyTextToClipboard } from "../src/om/clipboard.js";
 import {
+  compactionEntry,
+  memoryDetails,
   observation,
   observationsRecordedEntry,
   reflection,
@@ -227,6 +229,47 @@ describe("/blackhole-memory command", () => {
     expect(msg).toContain("2 recorded");
     expect(msg).toContain("1 dropped");
     expect(msg).toContain("1 visible");
+  });
+
+  it("status Obs pool uses the live active observation pool, not the compaction snapshot", async () => {
+    const { pi, runtime, handlerMap } = createMockEnvironment();
+    registerMemoryCommand(pi as any, runtime as any);
+
+    const ui = { notify: vi.fn() };
+    const entries = [
+      textCustomMessage("raw-1", "aaaa"),
+      observationsRecordedEntry("om-obs-1", {
+        observations: [
+          observation("aaaaaaaaaaaa", { relevance: "medium", tokenCount: 10 }),
+          observation("aaaaaaaaaaab", { relevance: "medium", tokenCount: 20 }),
+        ],
+        coversUpToId: "raw-1",
+      }),
+      compactionEntry("c1", {
+        details: memoryDetails({
+          observations: [observation("aaaaaaaaaaaa", { relevance: "medium", tokenCount: 10 })],
+        }),
+      }),
+      observationsRecordedEntry("om-obs-2", {
+        observations: [observation("aaaaaaaaaaac", { relevance: "medium", tokenCount: 30 })],
+        coversUpToId: "raw-1",
+      }),
+    ];
+
+    await handlerMap.get("blackhole-memory")!([], {
+      cwd: "/tmp/test",
+      sessionManager: {
+        getBranch: vi.fn(() => entries),
+        getSessionId: vi.fn(() => "test-session"),
+      },
+      ui,
+    });
+
+    const msg = (ui.notify as any).mock.calls[0][0] as string;
+    // Live fold has 3 active observations (10 + 20 + 30 = 60 tokens).
+    // The compaction snapshot only preserves 1 observation (10 tokens).
+    expect(msg).toContain("~60 / 20,000 tokens");
+    expect(msg).toContain("pool 0%"); // 60 / 20000 = 0.3%, rounds to 0%
   });
 
   it("shows passive mode indicator when config.passive is true", async () => {

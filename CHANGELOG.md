@@ -2,6 +2,27 @@
 
 ---
 
+## [0.5.7] - 2026-09-21
+
+### Added
+
+- **Footer status bar.** pi-blackhole now shows live state in the pi footer (config key `statusBar`, default on; env `PI_BLACKHOLE_STATUSBAR`): three token gauges — O (transcript since the last observer run), P (observation pool fill), X (context since the last compaction) — plus worker spinners, `✓ +N` completion events, and compaction notes with their trigger reason. Gauges color by fill: dim under 80%, theme warning color from 80%, theme error color at 100%. The bar reads in-process state (`runtime.config`, `model-budget.ts`, `ledger/progress.ts`, `runtime.consolidationPhase`), so its numbers match `/blackhole-memory` status; it adds no file polling and no threshold guessing, only a 1-second in-process poll of the runtime state. If you ran the standalone `blackhole-status.ts` footer extension before, remove it: two writers on the same `setStatus` key race.
+
+### Changed
+
+- **Pi 0.87 is supported.** The `@earendil-works/*` devDependencies move to `0.87.0` in lockstep and the dependabot `>=0.87.0` hold is removed ([#118](https://github.com/k0valik/pi-blackhole/issues/118)). `peerDependencies` (`>=0.85.1 <1.0.0`) is unchanged: the observational-memory system-prompt carrier is probed at runtime, so consolidation keeps its prompt on 0.85/0.86 (legacy `AgentContext.systemPrompt`) and 0.87+ (leading transcript system message) — see Fixed.
+- **CI runs on pull requests targeting `dev` too.** `ci.yml` previously triggered only for `pull_request → main`, so PRs merged into the working branch were gated by bot reviews alone. The full gate (build → typecheck → lint → test → format:check) now covers both branches.
+
+### Fixed
+
+- **The compact-shape guard follows Pi 0.87's `_refreshFinalizedContext()` indirection.** 0.87 moved the `agent.state.messages` repoint out of `AgentSession.compact()` into a helper, so the guard that requires the write _inside_ `compact()` rejected the class and mid-run inline compaction failed closed on 0.87 ([#117](https://github.com/k0valik/pi-blackhole/issues/117)). The guard now accepts an assignment found one call level deep in one of the class's own prototype methods, and still rejects inherited helpers, deeper indirection, and a helper that only reads the property.
+- **Observational-memory consolidation keeps its system prompt on Pi 0.87.** 0.87 removed `AgentContext.systemPrompt` and now carries the prompt as a leading transcript `system` message, so the observer, reflector, and dropper would have silently run without their prompts. They now build whichever carrier the loaded host reads — probed by the presence of Pi 0.87's `createInitialSystemMessage` helper, not a version allowlist — so 0.85/0.86 keep the legacy field and 0.87+ gets the transcript message ([#118](https://github.com/k0valik/pi-blackhole/issues/118)).
+- **Discover Pi 0.86's bundled host behind its `createRequire` launcher.** Follow the same-package bootstrap file without executing it before locating the runtime chunk, so inline compaction captures the active `AgentSession` instead of patching the unused modular class and falling back to settled compaction. A bootstrap target that is missing, unreadable, or outside the Pi package now leaves the launcher's own source in place, so the direct-import scan still runs instead of being skipped.
+- **Observer preamble cap now applies in auto/off compaction modes.** `observerPreambleMaxTokens` was previously only enforced in manual mode, so auto-mode observer prompts could grow without bound even though the main session prompt stayed capped by `observationsPoolMaxTokens`; the observer now applies the same relevance-ranked selection budget in all modes, defaulting to 30% of `observerChunkMaxTokens` when unset.
+- **Observer preamble cap now covers reflections, and the context guard prices the full prompt.** Reflections were never trimmed (no drop entry type exists for them), leaving a permanently growing floor on the observer preamble; each preamble section is now capped at `observerPreambleMaxTokens` (reflections newest-first). The pre-flight `observer.context_window_exceeded` guard previously measured only `chunkTokens + 8000`, so oversized prompts sailed through and failed every attempt with a provider 400; it now accounts for the rendered preamble and the observer system prompt, skipping the model cleanly instead.
+
+---
+
 ## [0.5.6] - 2026-09-19
 
 ### Added

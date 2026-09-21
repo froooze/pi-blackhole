@@ -160,7 +160,10 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
       const full = fullProjection(entries);
       const drift = diffProjection(visible, full);
 
-      const visibleObservationTokens = tokenSum(visible.observations);
+      const observationPoolTokens = folded.activeObservations.reduce(
+        (sum, o) => sum + (o.tokenCount ?? 0),
+        0,
+      );
       const visibleReflectionTokens = tokenSum(visible.reflections);
       const observationLine = appendSuffixes(
         `Observations: ${folded.observations.length} recorded / ${folded.droppedObservationIds.size} dropped / ${visible.observations.length} visible`,
@@ -211,12 +214,12 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         "Transcript accumulated since last run. Triggers when exceeding threshold.",
         `Observer:       ~${obsProgress.toLocaleString()} tokens (triggers at ${runtime.config.observeAfterTokens.toLocaleString()})`,
         `Reflector:      ~${reflectionProgress.toLocaleString()} tokens (triggers at ${runtime.config.reflectAfterTokens.toLocaleString()})`,
-        `Dropper:        pool ${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}% — prunes at ≥${Math.round(runtime.config.dropperPoolFullnessThreshold * 100)}% pool (${dropProgress.toLocaleString()}/${runtime.config.reflectAfterTokens.toLocaleString()} new tokens)`,
+        `Dropper:        pool ${pct(observationPoolTokens, runtime.config.observationsPoolMaxTokens)}% — prunes at ≥${Math.round(runtime.config.dropperPoolFullnessThreshold * 100)}% pool (${dropProgress.toLocaleString()}/${runtime.config.reflectAfterTokens.toLocaleString()} new tokens)`,
         `Compaction:     ~${compactionProgress.toLocaleString()} tokens` +
           (isManualMode(runtime.config)
             ? " [manual]"
             : ` (triggers at ${autoCompactThreshold(runtime.config, ctx.model).toLocaleString()}${compactThresholdSuffix(runtime.config, sessionContextWindow(ctx.model, runtime.config))})`),
-        `Obs pool:       ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
+        `Obs pool:       ~${observationPoolTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(observationPoolTokens, runtime.config.observationsPoolMaxTokens)}%)`,
         `Reflect pool:   ~${visibleReflectionTokens.toLocaleString()} tokens`,
       ];
 
@@ -240,7 +243,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
               ? ""
               : ` (30% of ${runtime.config.observerChunkMaxTokens.toLocaleString()} chunk)`;
           lines.push(
-            `Preamble cap: ${preambleCap.toLocaleString()} tokens for observations${pctNote}`,
+            `Preamble cap: ${preambleCap.toLocaleString()} tokens per section (observations, reflections)${pctNote}`,
           );
           lines.push("Run /blackhole to flush and compact.");
         }

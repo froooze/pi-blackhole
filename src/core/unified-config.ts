@@ -256,6 +256,8 @@ export interface UnifiedConfig {
   memory: boolean;
   /** Writes debug JSONL to agent directory. */
   debugLog: boolean;
+  /** Show the blackhole footer status bar (token gauges + worker events). */
+  statusBar: boolean;
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
@@ -307,6 +309,7 @@ export const DEFAULTS: UnifiedConfig = {
 
   memory: true,
   debugLog: false,
+  statusBar: true,
 };
 
 /**
@@ -556,6 +559,7 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   if (typeof raw.memory === "boolean") c.memory = raw.memory;
   if (typeof raw.fullFoldAlways === "boolean") c.fullFoldAlways = raw.fullFoldAlways;
   if (typeof raw.debugLog === "boolean") c.debugLog = raw.debugLog;
+  if (typeof raw.statusBar === "boolean") c.statusBar = raw.statusBar;
 
   // Numeric fields — use nonNegativeInt for keys where 0 is meaningful
   // (observerPreambleMaxTokens 0 = auto, retainedToolOutputMaxTokens 0 = disabled)
