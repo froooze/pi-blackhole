@@ -68,7 +68,7 @@ Distills durable reflections from active observations — explicitly not a secon
 
 **Validation**: `normalizeReflectionContent` rejects empty or multiline content. `normalizeSupportingObservationIds` is **strict** — if *any* id is unknown, the reflection is rejected (unlike the observer/dropper filter pattern), because inflated support ids would make observations look more-covered than they are and cause unsafe downstream drops. Dedup is against existing reflections plus this run.
 
-**Edge cases**: returns `undefined` immediately when `observations.length === 0`. Emitting zero reflections is a valid, expected outcome ("it is better to emit zero reflections than one per observation"). Same throw-on-error-if-empty pattern as the observer.
+**Edge cases**: returns `undefined` immediately when `observations.length === 0`. Emitting zero reflections is a valid, expected outcome ("it is better to emit zero reflections than one per observation"). A failure follows the observer's contract: `runReflector` throws a `WorkerStreamError` carrying the count of reflections it discarded when the stream ends with `stopReason: "error"`, and when the agent turn cap cuts off a run that recorded something — so the stage never advances the reflector cursor over observations it did not crystallize — unless a valid, non-empty `complete: true` batch already closed the review. That close is kept and the trailing failure is written to `reflector.error_after_close`; a later batch that records or rejects anything retracts the close. An error before anything was recorded throws, as it always did.
 
 **Coverage tiers as review context**: `none`/`partial`/`strong` are guidance, not a quota, priority score, or instruction to emit. `supportingObservationIds` form a coverage/provenance set that doubles as dropper evidence — the reflector is the sole writer of the coverage relationship the dropper later trusts.
 
@@ -84,7 +84,7 @@ Identifies the *safest* active observations to remove from compacted memory; the
 
 **Validation**: `normalizeDropObservationIds` filters unknown ids (filter pattern). The tool ack reports running candidate count and the hard `maxDropsAllowed` so the model self-regulates.
 
-**Edge cases**: returns `undefined` when `observations.length === 0` or `maxDropsAllowed <= 0`. Result reasons: `selected_nonempty`, `no_tool_call`, `all_filtered`, `selected_empty`. Same throw-on-error-if-empty pattern.
+**Edge cases**: returns `undefined` when `observations.length === 0` or `maxDropsAllowed <= 0`. Result reasons: `selected_nonempty`, `no_tool_call`, `all_filtered`, `selected_empty`. `drop_observations` carries no complete flag, so no batch can prove the evaluation finished: `runDropper` throws a `WorkerStreamError` carrying the number of candidates it discarded whenever the stream ends with `stopReason: "error"`, and when the agent turn cap cuts off a run that had proposed candidates. The stage therefore never writes an `OM_OBSERVATIONS_DROPPED` marker over a half-evaluated window, and a run that proposed nothing still returns `undefined`.
 
 **Preservation floor**: regardless of relevance, budget pressure, coverage, or age, the prompt forbids dropping observations that uniquely carry user preferences/constraints/corrections, concrete completions, named identifiers, exact errors, decisions + rationale, event dates, unresolved blockers, or non-standard terminology. Dropping removes from active compacted memory only — ledger history and source evidence are retained.
 

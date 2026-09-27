@@ -1302,10 +1302,21 @@ async function runReflectorStage(
         retryable: isRetryableError(error),
         deterministic: isDeterministicError(error),
         cooldownWorthy: isCooldownWorthyError(error),
+        // Reflections recorded before the run failed and discarded with it.
+        discardedCount: getDiscardedCount(error),
       });
       // A timed-out session model has no candidate config to cool down, so
-      // retrying would stall on the same model for the full deadline again.
-      if (!candidateConfig && error instanceof WorkerAttemptTimeoutError) break;
+      // retrying would stall on the same model for the full deadline again. A
+      // session model cut off by the agent turn cap fails the same way for the
+      // same reason: `agentMaxTurns` is global config, so a retry spends another
+      // whole budget on an identical outcome. Candidates differ — they cool down
+      // and the fallback chain takes over.
+      if (
+        !candidateConfig &&
+        (error instanceof WorkerAttemptTimeoutError ||
+          (error instanceof WorkerStreamError && error.turnCapExhausted))
+      )
+        break;
       continue;
     }
   }
@@ -1592,10 +1603,21 @@ async function runDropperStage(
         retryable: isRetryableError(error),
         deterministic: isDeterministicError(error),
         cooldownWorthy: isCooldownWorthyError(error),
+        // Drop candidates recorded before the run failed and discarded with it.
+        discardedCount: getDiscardedCount(error),
       });
       // A timed-out session model has no candidate config to cool down, so
-      // retrying would stall on the same model for the full deadline again.
-      if (!candidateConfig && error instanceof WorkerAttemptTimeoutError) break;
+      // retrying would stall on the same model for the full deadline again. A
+      // session model cut off by the agent turn cap fails the same way for the
+      // same reason: `agentMaxTurns` is global config, so a retry spends another
+      // whole budget on an identical outcome. Candidates differ — they cool down
+      // and the fallback chain takes over.
+      if (
+        !candidateConfig &&
+        (error instanceof WorkerAttemptTimeoutError ||
+          (error instanceof WorkerStreamError && error.turnCapExhausted))
+      )
+        break;
       continue;
     }
   }

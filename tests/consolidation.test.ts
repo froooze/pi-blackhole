@@ -1412,6 +1412,99 @@ describe("observer turn-cap exhaustion", () => {
   });
 });
 
+/** Entries that make the reflector due and the dropper due, but not the observer. */
+const workerStageEntries = [
+  rawMessage("big-1", "x".repeat(40_000)),
+  {
+    type: "custom",
+    id: "obs-1",
+    customType: "om.observations.recorded",
+    data: {
+      coversUpToId: "big-1",
+      observations: [{ id: "o1", content: "a".repeat(100), tokenCount: 25 }],
+    },
+  },
+] as const;
+
+function workerStageFixture(source: "session" | "candidate") {
+  const fixture = makePipelineFixture({
+    observeAfterTokens: 100_000,
+    entries: workerStageEntries as unknown as TestEntry[],
+  });
+  fixture.runtime.config.reflectAfterTokens = 100;
+  if (source === "session") {
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { provider: "test", id: "session", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+  }
+  return fixture;
+}
+
+describe("reflector turn-cap exhaustion", () => {
+  const turnCapError = () =>
+    new WorkerStreamError(
+      "Reflector turn cap exhausted: 3 reflections recorded with no complete=true close",
+      3,
+      true,
+    );
+
+  test("a session model that exhausts the cap is not retried within the stage", async () => {
+    const fixture = workerStageFixture("session");
+    agents.runReflector.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    // `agentMaxTurns` is global config: a retry spends another whole budget on
+    // an identical outcome instead of reporting the exhausted budget.
+    expect(agents.runReflector).toHaveBeenCalledTimes(1);
+  });
+
+  test("a candidate that exhausts the cap cools down and the fallback is tried", async () => {
+    const fixture = workerStageFixture("candidate");
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runReflector.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalled();
+    expect(agents.runReflector.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("dropper turn-cap exhaustion", () => {
+  const turnCapError = () =>
+    new WorkerStreamError("Dropper turn cap exhausted: 3 drop candidates recorded", 3, true);
+
+  test("a session model that exhausts the cap is not retried within the stage", async () => {
+    const fixture = workerStageFixture("session");
+    agents.runReflector.mockResolvedValue([]);
+    agents.runDropper.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(agents.runDropper).toHaveBeenCalledTimes(1);
+  });
+
+  test("a candidate that exhausts the cap cools down and the fallback is tried", async () => {
+    const fixture = workerStageFixture("candidate");
+    agents.runReflector.mockResolvedValue([]);
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runDropper.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalled();
+    expect(agents.runDropper.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
 describe("worker stream options", () => {
   test("forwards the session id and cache retention to every memory worker", async () => {
     const fixture = makePipelineFixture({
