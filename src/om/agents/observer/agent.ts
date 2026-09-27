@@ -209,9 +209,11 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   let lastBatchComplete = false;
   // Whether the run has closed the chunk with a fully valid complete=true batch,
   // i.e. the model declared the chunk covered and the tool honored it. A later
-  // batch without rejections (a host that ignores `terminate` asks for more
-  // turns) does not revoke the close; a later batch with rejected entries does,
-  // because the tool just told the model coverage still needs corrections.
+  // batch that changes nothing (empty or all duplicates; a host that ignores
+  // `terminate` asks for more turns) does not revoke the close. A later batch
+  // that is not itself a clean close and records or rejects anything does: new
+  // observations under complete=false mean the model found the chunk not yet
+  // covered, and rejections mean the tool just told it corrections remain.
   let closedByCompleteBatch = false;
 
   const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
@@ -260,7 +262,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
           : "";
       const terminates = params.complete === true && rejected === 0;
       if (terminates) closedByCompleteBatch = true;
-      else if (rejected > 0) closedByCompleteBatch = false;
+      else if (added > 0 || rejected > 0) closedByCompleteBatch = false;
       const refusal =
         params.complete === true && rejected > 0
           ? ` complete=true was not honored: ${rejected} observation${rejected === 1 ? "" : "s"} in this batch still ${rejected === 1 ? "needs" : "need"} correcting — re-submit them with sourceEntryIds copied from the chunk; anything not re-submitted is discarded and will not be recorded.`

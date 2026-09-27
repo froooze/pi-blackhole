@@ -22,6 +22,7 @@ import {
   isRetryableError,
   isStaleExtensionContextError,
 } from "./retryable-error.js";
+import { sanitizeCooldownReason } from "./cooldown.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
@@ -893,12 +894,31 @@ export async function runObserverStage(
       if (!runtime.isGenerationActive(generation)) return "abort";
 
       // The run closed the chunk and then a later turn failed (a host that
-      // ignores `terminate`). The result is kept; the provider error is logged.
+      // ignores `terminate`). The close is kept, but the failure must not be
+      // silent: a deterministic error (bad key, removed model) gets the same
+      // cooldown the catch below applies, so the next cycle falls back instead
+      // of reporting success forever; a transient one only warns, since the
+      // model just produced a usable close.
       if (result.errorAfterClose) {
+        const afterClose = new Error(result.errorAfterClose);
+        const deterministic = isDeterministicError(afterClose);
         debugLog("observer.error_after_close", {
           error: result.errorAfterClose,
+          deterministic,
           coversUpToId,
         });
+        if (deterministic) {
+          runtime.recordRetryableError(stageModelForThinking, afterClose, "observer");
+          if (!stageModelForThinking) {
+            runtime.recordDeterministicError(resolved.model, afterClose, "observer");
+          }
+        }
+        if (ctx.hasUI) {
+          ctx.ui?.notify(
+            `Observational memory: observer kept its completed chunk, but a later turn failed: ${sanitizeCooldownReason(result.errorAfterClose)}`,
+            "warning",
+          );
+        }
       }
 
       if (result.observations && result.observations.length > 0) {

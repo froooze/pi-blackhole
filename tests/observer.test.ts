@@ -824,6 +824,43 @@ describe("runObserver", () => {
     expect(result.errorAfterClose).toBe("Stream connection severed");
   });
 
+  it("keeps the close when a later batch only repeats recorded observations", async () => {
+    const result = await runObserver({
+      ...baseArgs,
+      agentLoop: trailingErrorLoop([
+        { observations: [terseObservation], complete: true },
+        { observations: [terseObservation], complete: false },
+      ]),
+    });
+
+    expect(result.observations).toHaveLength(1);
+    expect(result.errorAfterClose).toBe("Stream connection severed");
+  });
+
+  it("throws when a later complete=false batch records new observations after the close", async () => {
+    await expect(
+      runObserver({
+        ...baseArgs,
+        agentLoop: trailingErrorLoop([
+          { observations: [terseObservation], complete: true },
+          {
+            observations: [
+              {
+                content: "User works on Windows",
+                relevance: "medium",
+                sourceEntryIds: ["entry-a"],
+              },
+            ],
+            complete: false,
+          },
+        ]),
+      }),
+    ).rejects.toMatchObject({
+      message: "Observer API error: Stream connection severed",
+      discardedObservations: 2,
+    });
+  });
+
   it("throws when an empty complete=true close is followed by a trailing error", async () => {
     await expect(
       runObserver({

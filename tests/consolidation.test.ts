@@ -1240,6 +1240,79 @@ describe("worker attempt hard timeout", () => {
   });
 });
 
+describe("observer error after a kept close", () => {
+  function keptCloseFixture(errorAfterClose: string) {
+    const notices: Array<{ message: string; level?: string }> = [];
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100,
+      entries: [rawMessage("big-1", "x".repeat(40_000))],
+      notify: (message, level) => notices.push({ message, level }),
+    });
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runObserver.mockResolvedValue({
+      observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["big-1"] })],
+      errorAfterClose,
+    });
+    return { fixture, notices, retryable };
+  }
+
+  test("a deterministic error keeps the chunk and cools the model down", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("HTTP 401 Unauthorized");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "HTTP 401 Unauthorized" }),
+      "observer",
+    );
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed: HTTP 401 Unauthorized"),
+      level: "warning",
+    });
+  });
+
+  test("a deterministic error on the session model cools that model down", async () => {
+    const { fixture, retryable } = keptCloseFixture("HTTP 401 Unauthorized");
+    const sessionModel = { provider: "test", id: "session", contextWindow: 1_000_000 };
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: sessionModel,
+      apiKey: "test",
+    });
+    const deterministic = vi
+      .spyOn(fixture.runtime, "recordDeterministicError")
+      .mockImplementation(() => {});
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
+    expect(retryable).toHaveBeenCalledWith(undefined, expect.any(Error), "observer");
+    expect(deterministic).toHaveBeenCalledWith(
+      sessionModel,
+      expect.objectContaining({ message: "HTTP 401 Unauthorized" }),
+      "observer",
+    );
+  });
+
+  test("a transient error keeps the chunk and only warns", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("Stream connection severed");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed: Stream connection severed"),
+      level: "warning",
+    });
+  });
+});
+
 describe("worker stream options", () => {
   test("forwards the session id and cache retention to every memory worker", async () => {
     const fixture = makePipelineFixture({
