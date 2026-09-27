@@ -16,7 +16,7 @@ import {
 import {
   isDeterministicError,
   isRetryableError,
-  ObserverStreamError,
+  WorkerStreamError,
 } from "../src/om/retryable-error.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
 import { leadingSystemPrompt } from "./fixtures/agent-context.js";
@@ -861,7 +861,7 @@ describe("runObserver", () => {
       }),
     ).rejects.toMatchObject({
       message: "Observer API error: Stream connection severed",
-      discardedObservations: 2,
+      discardedCount: 2,
     });
   });
 
@@ -873,7 +873,7 @@ describe("runObserver", () => {
       }),
     ).rejects.toMatchObject({
       message: "Observer API error: Stream connection severed",
-      discardedObservations: 0,
+      discardedCount: 0,
     });
   });
 
@@ -891,7 +891,7 @@ describe("runObserver", () => {
           },
         ]),
       }),
-    ).rejects.toBeInstanceOf(ObserverStreamError);
+    ).rejects.toBeInstanceOf(WorkerStreamError);
   });
 
   it("throws when a refused complete=true batch retracts an earlier close", async () => {
@@ -910,7 +910,7 @@ describe("runObserver", () => {
       }),
     ).rejects.toMatchObject({
       message: "Observer API error: Stream connection severed",
-      discardedObservations: 1,
+      discardedCount: 1,
     });
   });
 
@@ -957,10 +957,10 @@ describe("runObserver", () => {
       maxTurns: 1,
     }).catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(ObserverStreamError);
+    expect(error).toBeInstanceOf(WorkerStreamError);
     expect(error).toMatchObject({
       message: expect.stringContaining("turn cap"),
-      discardedObservations: 1,
+      discardedCount: 1,
     });
   });
 
@@ -974,7 +974,7 @@ describe("runObserver", () => {
     // `agentMaxTurns` is a config limit, not a credential or payload failure:
     // classifying it deterministic would cool the session model for an hour
     // instead of letting the stage report the exhausted budget.
-    expect(error).toBeInstanceOf(ObserverStreamError);
+    expect(error).toBeInstanceOf(WorkerStreamError);
     expect(isDeterministicError(error)).toBe(false);
     expect(isRetryableError(error)).toBe(false);
   });

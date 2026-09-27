@@ -43,29 +43,29 @@ const DETERMINISTIC_SIGNAL_RE =
   /error|fail|missing|forbidden|denied|bad request|not found|unauthorized|invalid/i;
 
 /**
- * Observer run that ended before it closed the chunk, discarding whatever it
- * had recorded. The message stays `Observer API error: …` (or names the turn
- * cap) so the regex classification below is unchanged; the count of
- * observations recorded before the failure travels out of band, where no
- * classifier can misread it as a status code. It lives here rather than in
- * the observer module so consolidation can read it without a static import of
- * the lazily loaded observer agent.
+ * A consolidation worker (observer, reflector, dropper) run that ended before
+ * it settled its work, discarding whatever it had already recorded. The message
+ * stays that worker's own `… API error: …` text (or names the turn cap) so the
+ * regex classification below is unchanged; the count of records written before
+ * the failure travels out of band, where no classifier can misread it as a
+ * status code. It lives here rather than in the agent modules so consolidation
+ * can read it without a static import of the lazily loaded workers.
  */
-export class ObserverStreamError extends Error {
+export class WorkerStreamError extends Error {
   constructor(
     message: string,
-    readonly discardedObservations: number,
+    readonly discardedCount: number,
     /** True when the agent turn cap cut the run off instead of a stream failure. */
     readonly turnCapExhausted = false,
   ) {
     super(message);
-    this.name = "ObserverStreamError";
+    this.name = "WorkerStreamError";
   }
 }
 
-/** Observations an observer stream error discarded, or undefined for any other error. */
-export function getDiscardedObservations(error: unknown): number | undefined {
-  return error instanceof ObserverStreamError ? error.discardedObservations : undefined;
+/** Records a worker stream error discarded, or undefined for any other error. */
+export function getDiscardedCount(error: unknown): number | undefined {
+  return error instanceof WorkerStreamError ? error.discardedCount : undefined;
 }
 
 /** Check whether an error is a deterministic client error (see above). */

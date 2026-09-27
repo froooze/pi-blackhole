@@ -16,12 +16,12 @@ import { type ResolveResult, type Runtime, type RuntimeGeneration } from "./runt
 import { withProviderAttributionHeaders } from "./provider-stream.js";
 import { runWorkerAttempt, WorkerAttemptTimeoutError } from "./worker-attempt.js";
 import {
-  getDiscardedObservations,
+  getDiscardedCount,
   isCooldownWorthyError,
   isDeterministicError,
   isRetryableError,
   isStaleExtensionContextError,
-  ObserverStreamError,
+  WorkerStreamError,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
@@ -1023,8 +1023,8 @@ export async function runObserverStage(
         retryable: isRetryableError(error),
         deterministic: isDeterministicError(error),
         cooldownWorthy: isCooldownWorthyError(error),
-        // Observations recorded before a stream error and discarded with the run.
-        discardedObservations: getDiscardedObservations(error),
+        // Records written before a stream error and discarded with the run.
+        discardedCount: getDiscardedCount(error),
       });
       // A timed-out session model has no candidate config to cool down, so
       // the loop would re-resolve the same stalled model and burn the full
@@ -1036,7 +1036,7 @@ export async function runObserverStage(
       if (
         !candidateConfig &&
         (error instanceof WorkerAttemptTimeoutError ||
-          (error instanceof ObserverStreamError && error.turnCapExhausted))
+          (error instanceof WorkerStreamError && error.turnCapExhausted))
       )
         break;
       // Continue loop — resolveModel will skip the cooled-down model

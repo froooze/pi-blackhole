@@ -26,7 +26,7 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
-import { ObserverStreamError } from "../../retryable-error.js";
+import { WorkerStreamError } from "../../retryable-error.js";
 
 interface RunObserverArgs {
   model: Model<any>;
@@ -388,7 +388,7 @@ ${conversation}`;
   if (agentError && !(closedByCompleteBatch && accumulated.size > 0)) {
     // The message stays byte-identical: isDeterministicError scans it for bare
     // 4xx codes, so an interpolated observation count could misclassify it.
-    throw new ObserverStreamError(`Observer API error: ${agentError}`, accumulated.size);
+    throw new WorkerStreamError(`Observer API error: ${agentError}`, accumulated.size);
   }
 
   // The turn cap ended the run before the model ever closed the chunk: the
@@ -399,7 +399,7 @@ ${conversation}`;
   // changes nothing. The message names no status code: this is a config limit,
   // not a provider failure, so it must not cool a session model as deterministic.
   if (turnCap?.exhausted && accumulated.size > 0 && !closedByCompleteBatch) {
-    throw new ObserverStreamError(
+    throw new WorkerStreamError(
       `Observer turn cap exhausted: ${accumulated.size} observation${accumulated.size === 1 ? "" : "s"} recorded with no complete=true close`,
       accumulated.size,
       true,

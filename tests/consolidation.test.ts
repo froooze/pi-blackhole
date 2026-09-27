@@ -30,7 +30,7 @@ import {
   savePendingDropped,
   savePendingObservation,
 } from "../src/om/pending.js";
-import { ObserverStreamError } from "../src/om/retryable-error.js";
+import { WorkerStreamError } from "../src/om/retryable-error.js";
 
 /** Cursor round trips write real pending files, so redirect the agent dir. */
 const cursorTestDir = join(tmpdir(), `pi-blackhole-consolidation-cursors-${Date.now()}`);
@@ -1373,7 +1373,7 @@ describe("observer error after a kept close", () => {
 });
 
 describe("observer turn-cap exhaustion", () => {
-  const turnCapError = () => new ObserverStreamError("Observer turn cap exhausted", 3, true);
+  const turnCapError = () => new WorkerStreamError("Observer turn cap exhausted", 3, true);
 
   test("a session model that exhausts the cap is not retried within the stage", async () => {
     const fixture = makePipelineFixture({

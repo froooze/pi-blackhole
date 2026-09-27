@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  getDiscardedObservations,
+  getDiscardedCount,
   isCooldownWorthyError,
   isDeterministicError,
   isRetryableError,
-  ObserverStreamError,
+  WorkerStreamError,
 } from "../src/om/retryable-error.js";
 
-describe("getDiscardedObservations", () => {
-  it("reads the count only from an ObserverStreamError", () => {
-    expect(getDiscardedObservations(new ObserverStreamError("Observer API error: x", 3))).toBe(3);
-    expect(getDiscardedObservations(new Error("Observer API error: x"))).toBeUndefined();
-    expect(getDiscardedObservations(undefined)).toBeUndefined();
-    expect(getDiscardedObservations(null)).toBeUndefined();
+describe("getDiscardedCount", () => {
+  it("reads the count only from a WorkerStreamError", () => {
+    expect(getDiscardedCount(new WorkerStreamError("Observer API error: x", 3))).toBe(3);
+    expect(getDiscardedCount(new Error("Observer API error: x"))).toBeUndefined();
+    expect(getDiscardedCount(undefined)).toBeUndefined();
+    expect(getDiscardedCount(null)).toBeUndefined();
   });
 });
 

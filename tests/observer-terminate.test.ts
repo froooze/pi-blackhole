@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest";
 
 import { runObserver } from "../src/om/agents/observer/agent.js";
-import { ObserverStreamError } from "../src/om/retryable-error.js";
+import { WorkerStreamError } from "../src/om/retryable-error.js";
 import { createScriptedStream } from "./fixtures/scripted-stream.js";
 
 const baseArgs = {
@@ -94,12 +94,12 @@ describe("real agent loop honors record_observations terminate", () => {
 
     const error = await runObserver({ ...baseArgs, streamFn }).catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(ObserverStreamError);
+    expect(error).toBeInstanceOf(WorkerStreamError);
     expect(error).toMatchObject({
       message: expect.stringMatching(
         /^Observer API error: scripted stream exhausted: the agent loop requested turn 2/,
       ),
-      discardedObservations: 1,
+      discardedCount: 1,
     });
     expect(calls()).toBe(2);
   });
@@ -117,7 +117,7 @@ describe("real agent loop honors record_observations terminate", () => {
 
     await expect(runObserver({ ...baseArgs, streamFn })).rejects.toMatchObject({
       message: expect.stringMatching(/^Observer API error: scripted stream exhausted/),
-      discardedObservations: 1,
+      discardedCount: 1,
     });
   });
 
