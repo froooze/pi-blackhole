@@ -30,6 +30,7 @@ import {
   savePendingDropped,
   savePendingObservation,
 } from "../src/om/pending.js";
+import { ObserverStreamError } from "../src/om/retryable-error.js";
 
 /** Cursor round trips write real pending files, so redirect the agent dir. */
 const cursorTestDir = join(tmpdir(), `pi-blackhole-consolidation-cursors-${Date.now()}`);
@@ -1324,6 +1325,90 @@ describe("observer error after a kept close", () => {
       level: "warning",
     });
     expect(notices.some((n) => n.message.includes("severed"))).toBe(false);
+  });
+
+  test("a transient error points at the debug log only when debugLog is on", async () => {
+    const { fixture, notices } = keptCloseFixture("Stream connection severed");
+    fixture.runtime.config.debugLog = true;
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("details in debug log"),
+      level: "warning",
+    });
+  });
+
+  test("a transient error does not promise a debug log entry when debugLog is off", async () => {
+    const { fixture, notices } = keptCloseFixture("Stream connection severed");
+
+    await fixture.run();
+
+    expect(fixture.runtime.config.debugLog).toBe(false);
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("enable debugLog for details"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("details in debug log"))).toBe(false);
+  });
+
+  test("a cooldownHours-0 candidate does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptCloseFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "candidate" as const,
+      candidateConfig: { provider: "test", id: "model", cooldownHours: 0 },
+      model: { provider: "test", id: "model", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("model skipped for this cycle"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("cooldown log"))).toBe(false);
+  });
+});
+
+describe("observer turn-cap exhaustion", () => {
+  const turnCapError = () => new ObserverStreamError("Observer turn cap exhausted", 3, true);
+
+  test("a session model that exhausts the cap is not retried within the stage", async () => {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100,
+      entries: [rawMessage("big-1", "x".repeat(40_000))],
+    });
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { provider: "test", id: "session", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+    agents.runObserver.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    // The cap is a config limit: re-running the same model on the same chunk
+    // would burn another full budget, so the stage stops after one attempt.
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+  });
+
+  test("a candidate that exhausts the cap cools down and the fallback is tried", async () => {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100,
+      entries: [rawMessage("big-1", "x".repeat(40_000))],
+    });
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runObserver.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalled();
+    expect(agents.runObserver.mock.calls.length).toBeGreaterThan(1);
   });
 });
 

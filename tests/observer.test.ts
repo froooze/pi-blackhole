@@ -13,7 +13,11 @@ import {
   OBSERVATION_TIMESTAMP_PATTERN,
   runObserver,
 } from "../src/om/agents/observer/agent.js";
-import { ObserverStreamError } from "../src/om/retryable-error.js";
+import {
+  isDeterministicError,
+  isRetryableError,
+  ObserverStreamError,
+} from "../src/om/retryable-error.js";
 import { estimateStringTokens } from "../src/om/tokens.js";
 import { leadingSystemPrompt } from "./fixtures/agent-context.js";
 
@@ -908,6 +912,114 @@ describe("runObserver", () => {
       message: "Observer API error: Stream connection severed",
       discardedObservations: 1,
     });
+  });
+
+  // The turn cap can end a run mid-chunk. A partial batch that never closed is
+  // not a completed chunk: reporting it as success would advance coversUpToId
+  // and the tail of the chunk would never be observed.
+  function turnCapLoop(
+    batches: Array<{ observations: unknown[]; complete?: boolean }>,
+    capEndsRun = true,
+    agentError?: string,
+  ) {
+    return ((_prompts: any[], context: any, config: any) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const [index, batch] of batches.entries()) {
+          await context.tools[0].execute(`call-${index}`, batch);
+        }
+        if (capEndsRun) {
+          // The host enforces the cap after the completed turn; it does not
+          // know or care that the run never closed the chunk.
+          config.finishTurn?.({ message: { stopReason: "toolUse" } });
+        }
+        if (agentError !== undefined) {
+          yield {
+            type: "agent_end",
+            messages: [
+              {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: agentError,
+              },
+            ],
+          };
+        }
+      },
+      result: async () => ({}),
+    })) as any;
+  }
+
+  it("throws when the turn cap ends a run that never closed", async () => {
+    const error = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop([{ observations: [terseObservation], complete: false }]),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ObserverStreamError);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("turn cap"),
+      discardedObservations: 1,
+    });
+  });
+
+  it("does not classify turn-cap exhaustion as a provider error", async () => {
+    const error = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop([{ observations: [terseObservation], complete: false }]),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    // `agentMaxTurns` is a config limit, not a credential or payload failure:
+    // classifying it deterministic would cool the session model for an hour
+    // instead of letting the stage report the exhausted budget.
+    expect(error).toBeInstanceOf(ObserverStreamError);
+    expect(isDeterministicError(error)).toBe(false);
+    expect(isRetryableError(error)).toBe(false);
+  });
+
+  it("keeps a completed close when the turn cap ends the run", async () => {
+    const result = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop([{ observations: [terseObservation], complete: true }]),
+      maxTurns: 1,
+    });
+
+    expect(result.observations).toHaveLength(1);
+    expect(result.errorAfterClose).toBeUndefined();
+  });
+
+  it("does not throw when the turn cap ends a run that recorded nothing", async () => {
+    const result = await runObserver({ ...baseArgs, agentLoop: turnCapLoop([]), maxTurns: 1 });
+
+    expect(result.observations).toBeUndefined();
+    expect(result.emptyReason).toEqual({ kind: "tool_not_called" });
+  });
+
+  it("keeps a non-closed partial batch when the turn cap never fires", async () => {
+    const result = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop([{ observations: [terseObservation], complete: false }], false),
+      maxTurns: 5,
+    });
+
+    expect(result.observations).toHaveLength(1);
+    expect(result.errorAfterClose).toBeUndefined();
+  });
+
+  it("reports the stream error rather than the turn cap when both end the run", async () => {
+    const error = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop(
+        [{ observations: [terseObservation], complete: false }],
+        true,
+        "Stream connection severed",
+      ),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ message: "Observer API error: Stream connection severed" });
   });
 });
 

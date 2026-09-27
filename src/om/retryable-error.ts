@@ -43,8 +43,9 @@ const DETERMINISTIC_SIGNAL_RE =
   /error|fail|missing|forbidden|denied|bad request|not found|unauthorized|invalid/i;
 
 /**
- * Observer run that ended in a stream error. The message stays `Observer API
- * error: …` so the regex classification below is unchanged; the count of
+ * Observer run that ended before it closed the chunk, discarding whatever it
+ * had recorded. The message stays `Observer API error: …` (or names the turn
+ * cap) so the regex classification below is unchanged; the count of
  * observations recorded before the failure travels out of band, where no
  * classifier can misread it as a status code. It lives here rather than in
  * the observer module so consolidation can read it without a static import of
@@ -54,6 +55,8 @@ export class ObserverStreamError extends Error {
   constructor(
     message: string,
     readonly discardedObservations: number,
+    /** True when the agent turn cap cut the run off instead of a stream failure. */
+    readonly turnCapExhausted = false,
   ) {
     super(message);
     this.name = "ObserverStreamError";

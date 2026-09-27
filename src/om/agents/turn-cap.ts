@@ -33,6 +33,12 @@ export interface TurnCap {
   shouldStopAfterTurn: (context: TurnCapContext) => boolean;
   /** Pi 0.87 hook: `{ action: "end" }` ends the run, `undefined` keeps normal scheduling. */
   finishTurn: (context: TurnCapContext) => AgentTurnDecision | undefined;
+  /**
+   * True once either hook has ended the run by spending the last turn of the
+   * budget. Hard-exited turns (`error`/`aborted`) never set it: the loop ends
+   * those runs itself, so the cap was not the cause.
+   */
+  readonly exhausted: boolean;
 }
 
 /**
@@ -53,6 +59,7 @@ export function createTurnCap(maxTurns: number): TurnCap {
 
   let legacyTurns = 0;
   let finishTurns = 0;
+  let exhausted = false;
 
   const hardExited = (context: TurnCapContext): boolean => {
     const stopReason = context.message?.stopReason;
@@ -63,12 +70,19 @@ export function createTurnCap(maxTurns: number): TurnCap {
     shouldStopAfterTurn: (context) => {
       if (hardExited(context)) return false;
       legacyTurns++;
-      return legacyTurns >= maxTurns;
+      if (legacyTurns < maxTurns) return false;
+      exhausted = true;
+      return true;
     },
     finishTurn: (context) => {
       if (hardExited(context)) return undefined;
       finishTurns++;
-      return finishTurns >= maxTurns ? { action: "end" } : undefined;
+      if (finishTurns < maxTurns) return undefined;
+      exhausted = true;
+      return { action: "end" };
+    },
+    get exhausted() {
+      return exhausted;
     },
   };
 }

@@ -88,4 +88,41 @@ describe("createTurnCap", () => {
   it("counts a turn without a message as a completed turn", () => {
     expect(createTurnCap(1).finishTurn({})).toEqual({ action: "end" });
   });
+
+  it("reports exhaustion only once a hook actually ends the run", () => {
+    const cap = createTurnCap(2);
+
+    expect(cap.exhausted).toBe(false);
+    cap.finishTurn(completedTurn);
+    expect(cap.exhausted).toBe(false);
+    cap.finishTurn(completedTurn);
+    expect(cap.exhausted).toBe(true);
+  });
+
+  it("reports exhaustion from the 0.86 shouldStopAfterTurn hook", () => {
+    const cap = createTurnCap(1);
+
+    expect(cap.shouldStopAfterTurn(completedTurn)).toBe(true);
+    expect(cap.exhausted).toBe(true);
+  });
+
+  it("never reports exhaustion for hard-exited turns", () => {
+    const cap = createTurnCap(1);
+
+    cap.finishTurn(errorTurn);
+    cap.finishTurn(abortedTurn);
+    cap.shouldStopAfterTurn(errorTurn);
+    cap.shouldStopAfterTurn(abortedTurn);
+
+    expect(cap.exhausted).toBe(false);
+  });
+
+  it("does not report exhaustion before the cap is reached", () => {
+    const cap = createTurnCap(3);
+
+    cap.finishTurn(completedTurn);
+    cap.shouldStopAfterTurn(completedTurn);
+
+    expect(cap.exhausted).toBe(false);
+  });
 });

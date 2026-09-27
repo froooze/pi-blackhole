@@ -3,8 +3,10 @@
  *
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/agents/observer/agent.ts)
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
- * and throws if the API errored without collecting any tool results.
- * This allows the consolidation pipeline to fall back to alternative models.
+ * and throws unless the run already closed the chunk with a valid, non-empty
+ * complete=true batch, so the consolidation pipeline can fall back to another
+ * model instead of advancing coversUpToId over a half-observed chunk. The same
+ * guard covers a run the agent turn cap cut off mid-chunk.
  */
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -329,6 +331,9 @@ ${conversation}`;
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
+  // Kept in scope past the config so the run can tell "the model stopped" from
+  // "the cap cut the model off".
+  const turnCap = effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : undefined;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
@@ -342,7 +347,9 @@ ${conversation}`;
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : {}),
+    ...(turnCap
+      ? { shouldStopAfterTurn: turnCap.shouldStopAfterTurn, finishTurn: turnCap.finishTurn }
+      : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;
@@ -382,6 +389,21 @@ ${conversation}`;
     // The message stays byte-identical: isDeterministicError scans it for bare
     // 4xx codes, so an interpolated observation count could misclassify it.
     throw new ObserverStreamError(`Observer API error: ${agentError}`, accumulated.size);
+  }
+
+  // The turn cap ended the run before the model ever closed the chunk: the
+  // partial batch is not completed coverage, so returning it as success would
+  // advance coversUpToId and silently drop the tail of the chunk. Throwing
+  // keeps the cursor where it is and lets the stage's fallback chain retry.
+  // A valid non-empty close already settled the chunk, so a cap firing after it
+  // changes nothing. The message names no status code: this is a config limit,
+  // not a provider failure, so it must not cool a session model as deterministic.
+  if (turnCap?.exhausted && accumulated.size > 0 && !closedByCompleteBatch) {
+    throw new ObserverStreamError(
+      `Observer turn cap exhausted: ${accumulated.size} observation${accumulated.size === 1 ? "" : "s"} recorded with no complete=true close`,
+      accumulated.size,
+      true,
+    );
   }
 
   if (accumulated.size === 0) {

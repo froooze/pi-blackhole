@@ -21,6 +21,7 @@ import {
   isDeterministicError,
   isRetryableError,
   isStaleExtensionContextError,
+  ObserverStreamError,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
@@ -903,6 +904,11 @@ export async function runObserverStage(
       if (result.errorAfterClose) {
         const afterClose = new Error(`Observer API error: ${result.errorAfterClose}`);
         const deterministic = isDeterministicError(afterClose);
+        // A cooldown only reaches the cooldown file when the model has a window:
+        // a cooldownHours: 0 candidate is skipped in-memory for this stage only,
+        // while the session model is cooled by recordDeterministicError below.
+        const cooled =
+          deterministic && (!stageModelForThinking || stageModelForThinking.cooldownHours !== 0);
         debugLog("observer.error_after_close", {
           error: result.errorAfterClose,
           deterministic,
@@ -916,12 +922,17 @@ export async function runObserverStage(
         }
         if (ctx.hasUI) {
           // Issue #80: the error text can be a provider body; it goes to the
-          // cooldown/debug log only, never into the toast.
+          // cooldown/debug log only, never into the toast. The pointer itself
+          // must be true too, so it names only a destination that was written.
           ctx.ui?.notify(
             `Observational memory: observer kept its completed chunk, but a later turn failed (${
               deterministic
-                ? "deterministic error, model cooled down; details in cooldown log"
-                : "transient error; details in debug log"
+                ? cooled
+                  ? "deterministic error, model cooled down; details in cooldown log"
+                  : "deterministic error, model skipped for this cycle; no cooldown recorded"
+                : runtime.config.debugLog === true
+                  ? "transient error; details in debug log"
+                  : "transient error; enable debugLog for details"
             })`,
             "warning",
           );
@@ -1018,7 +1029,16 @@ export async function runObserverStage(
       // A timed-out session model has no candidate config to cool down, so
       // the loop would re-resolve the same stalled model and burn the full
       // deadline on every remaining attempt. Treat the stage as exhausted.
-      if (!candidateConfig && error instanceof WorkerAttemptTimeoutError) break;
+      // A session model cut off by the agent turn cap fails the same way for
+      // the same reason: `agentMaxTurns` is global config, so a retry spends
+      // another whole budget on an identical outcome. Candidates differ — they
+      // cool down and the fallback chain takes over.
+      if (
+        !candidateConfig &&
+        (error instanceof WorkerAttemptTimeoutError ||
+          (error instanceof ObserverStreamError && error.turnCapExhausted))
+      )
+        break;
       // Continue loop — resolveModel will skip the cooled-down model
       continue;
     }
