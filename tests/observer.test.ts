@@ -811,7 +811,7 @@ describe("runObserver", () => {
     expect(result.errorAfterClose).toBe("Stream connection severed");
   });
 
-  it("keeps the close when a later complete=false batch precedes the trailing error", async () => {
+  it("keeps the close when a later complete=false batch is empty (no stall on hosts that ignore terminate)", async () => {
     const result = await runObserver({
       ...baseArgs,
       agentLoop: trailingErrorLoop([

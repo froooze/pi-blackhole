@@ -22,7 +22,6 @@ import {
   isRetryableError,
   isStaleExtensionContextError,
 } from "./retryable-error.js";
-import { sanitizeCooldownReason } from "./cooldown.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
 import { serializeSourceAddressedBranchEntries } from "./serialize.js";
@@ -898,9 +897,11 @@ export async function runObserverStage(
       // silent: a deterministic error (bad key, removed model) gets the same
       // cooldown the catch below applies, so the next cycle falls back instead
       // of reporting success forever; a transient one only warns, since the
-      // model just produced a usable close.
+      // model just produced a usable close. The error is classified with the
+      // same `Observer API error:` prefix the throw path uses, so a bare
+      // provider code such as `401` is deterministic on both paths.
       if (result.errorAfterClose) {
-        const afterClose = new Error(result.errorAfterClose);
+        const afterClose = new Error(`Observer API error: ${result.errorAfterClose}`);
         const deterministic = isDeterministicError(afterClose);
         debugLog("observer.error_after_close", {
           error: result.errorAfterClose,
@@ -914,8 +915,14 @@ export async function runObserverStage(
           }
         }
         if (ctx.hasUI) {
+          // Issue #80: the error text can be a provider body; it goes to the
+          // cooldown/debug log only, never into the toast.
           ctx.ui?.notify(
-            `Observational memory: observer kept its completed chunk, but a later turn failed: ${sanitizeCooldownReason(result.errorAfterClose)}`,
+            `Observational memory: observer kept its completed chunk, but a later turn failed (${
+              deterministic
+                ? "deterministic error, model cooled down; details in cooldown log"
+                : "transient error; details in debug log"
+            })`,
             "warning",
           );
         }

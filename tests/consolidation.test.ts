@@ -1266,13 +1266,26 @@ describe("observer error after a kept close", () => {
     expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
     expect(retryable).toHaveBeenCalledWith(
       { provider: "test", id: "model" },
-      expect.objectContaining({ message: "HTTP 401 Unauthorized" }),
+      expect.objectContaining({ message: "Observer API error: HTTP 401 Unauthorized" }),
       "observer",
     );
     expect(notices).toContainEqual({
-      message: expect.stringContaining("later turn failed: HTTP 401 Unauthorized"),
+      message: expect.stringContaining("later turn failed (deterministic error"),
       level: "warning",
     });
+    expect(notices.some((n) => n.message.includes("Unauthorized"))).toBe(false);
+  });
+
+  test("a bare status code is classified like the throw path", async () => {
+    const { fixture, retryable } = keptCloseFixture("401");
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "Observer API error: 401" }),
+      "observer",
+    );
   });
 
   test("a deterministic error on the session model cools that model down", async () => {
@@ -1294,7 +1307,7 @@ describe("observer error after a kept close", () => {
     expect(retryable).toHaveBeenCalledWith(undefined, expect.any(Error), "observer");
     expect(deterministic).toHaveBeenCalledWith(
       sessionModel,
-      expect.objectContaining({ message: "HTTP 401 Unauthorized" }),
+      expect.objectContaining({ message: "Observer API error: HTTP 401 Unauthorized" }),
       "observer",
     );
   });
@@ -1307,9 +1320,10 @@ describe("observer error after a kept close", () => {
     expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
     expect(retryable).not.toHaveBeenCalled();
     expect(notices).toContainEqual({
-      message: expect.stringContaining("later turn failed: Stream connection severed"),
+      message: expect.stringContaining("later turn failed (transient error"),
       level: "warning",
     });
+    expect(notices.some((n) => n.message.includes("severed"))).toBe(false);
   });
 });
 
