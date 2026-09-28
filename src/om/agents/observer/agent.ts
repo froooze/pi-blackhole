@@ -26,7 +26,7 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
-import { WorkerStreamError } from "../../retryable-error.js";
+import { withDiscardedCount, WorkerStreamError } from "../../retryable-error.js";
 
 interface RunObserverArgs {
   model: Model<any>;
@@ -362,20 +362,26 @@ ${conversation}`;
   const streamFn = args.streamFn ?? bridgeStreamFn;
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
-  for await (const event of stream) {
-    // Drain events; the tool's execute already collects records.
-    if (event.type === "agent_end") {
-      const msgs = ((event as any).messages || []) as Array<{
-        stopReason?: string;
-        errorMessage?: string;
-      }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
+  try {
+    for await (const event of stream) {
+      // Drain events; the tool's execute already collects records.
+      if (event.type === "agent_end") {
+        const msgs = ((event as any).messages || []) as Array<{
+          stopReason?: string;
+          errorMessage?: string;
+        }>;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.stopReason === "error") {
+          agentError = lastMsg.errorMessage ?? "Unknown API error";
+        }
       }
     }
+    await stream.result();
+  } catch (error) {
+    // A stream that breaks outright never emits agent_end, so the guard below
+    // never sees it — yet the run still holds everything recorded so far.
+    throw withDiscardedCount(error, accumulated.size);
   }
-  await stream.result();
 
   // A run that already closed the chunk with a valid complete=true batch that
   // recorded something keeps its result however the loop ended: on a host that

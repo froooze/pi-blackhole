@@ -21,7 +21,7 @@ import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
-import { WorkerStreamError } from "../../retryable-error.js";
+import { withDiscardedCount, WorkerStreamError } from "../../retryable-error.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { reflectionToSummaryLine, type Observation, type Reflection } from "../../ledger/index.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
@@ -390,20 +390,26 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   const streamFn = args.streamFn ?? bridgeStreamFn;
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
-  for await (const event of stream) {
-    // Tool execution collects candidate ids.
-    if (event.type === "agent_end") {
-      const msgs = ((event as any).messages || []) as Array<{
-        stopReason?: string;
-        errorMessage?: string;
-      }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
+  try {
+    for await (const event of stream) {
+      // Tool execution collects candidate ids.
+      if (event.type === "agent_end") {
+        const msgs = ((event as any).messages || []) as Array<{
+          stopReason?: string;
+          errorMessage?: string;
+        }>;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.stopReason === "error") {
+          agentError = lastMsg.errorMessage ?? "Unknown API error";
+        }
       }
     }
+    await stream.result();
+  } catch (error) {
+    // A stream that breaks outright never emits agent_end, so the guard below
+    // never sees it — yet the run still holds every candidate proposed so far.
+    throw withDiscardedCount(error, proposedDropIds.length);
   }
-  await stream.result();
 
   // `drop_observations` carries no complete flag, so no batch can prove the
   // evaluation finished. The stage writes an OM_OBSERVATIONS_DROPPED marker over

@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 import { runDropper } from "../src/om/agents/dropper/agent.js";
 import {
+  getDiscardedCount,
   isDeterministicError,
   isRetryableError,
   WorkerStreamError,
@@ -34,13 +35,14 @@ describe("runDropper failure guard", () => {
 
   function scriptedLoop(
     batches: ReadonlyArray<Record<string, unknown>>,
-    options: { capEndsRun?: boolean; agentError?: string } = {},
+    options: { capEndsRun?: boolean; agentError?: string; streamFailure?: unknown } = {},
   ) {
     return ((_prompts: any[], context: any, config: any) => ({
       async *[Symbol.asyncIterator]() {
         for (const [index, batch] of batches.entries()) {
           await context.tools[0].execute(`call-${index}`, batch);
         }
+        if (options.streamFailure !== undefined) throw options.streamFailure;
         if (options.capEndsRun) {
           config.finishTurn?.({ message: { stopReason: "toolUse" } });
         }
@@ -121,5 +123,29 @@ describe("runDropper failure guard", () => {
     expect(error).toBeInstanceOf(WorkerStreamError);
     expect(isDeterministicError(error)).toBe(false);
     expect(isRetryableError(error)).toBe(false);
+  });
+
+  // A stream that breaks outright never produces agent_end, so the run's guard
+  // never runs — but the candidates it had already proposed still exist.
+  it("reports the candidates a raw stream failure discarded", async () => {
+    const failure = new Error("stream blew up");
+    const error = await runDropper({
+      ...baseArgs,
+      agentLoop: scriptedLoop([{ ids: ["aaaaaaaaaaaa"] }], { streamFailure: failure }),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBe(failure);
+    expect(getDiscardedCount(error)).toBe(1);
+  });
+
+  it("reports a zero count when the stream fails before anything was proposed", async () => {
+    const failure = new Error("stream blew up");
+    const error = await runDropper({
+      ...baseArgs,
+      agentLoop: scriptedLoop([], { streamFailure: failure }),
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBe(failure);
+    expect(getDiscardedCount(error)).toBe(0);
   });
 });

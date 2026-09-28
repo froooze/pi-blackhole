@@ -5,6 +5,7 @@ import {
   isCooldownWorthyError,
   isDeterministicError,
   isRetryableError,
+  withDiscardedCount,
   WorkerStreamError,
 } from "../src/om/retryable-error.js";
 
@@ -14,6 +15,32 @@ describe("getDiscardedCount", () => {
     expect(getDiscardedCount(new Error("Observer API error: x"))).toBeUndefined();
     expect(getDiscardedCount(undefined)).toBeUndefined();
     expect(getDiscardedCount(null)).toBeUndefined();
+  });
+});
+
+describe("withDiscardedCount", () => {
+  it("attaches the count without changing the thrown value", () => {
+    const failure = new Error("stream blew up");
+    expect(withDiscardedCount(failure, 4)).toBe(failure);
+    expect(getDiscardedCount(failure)).toBe(4);
+  });
+
+  it("leaves primitives and nullish values untouched", () => {
+    expect(withDiscardedCount("boom", 4)).toBe("boom");
+    expect(withDiscardedCount(null, 4)).toBeNull();
+    expect(withDiscardedCount(undefined, 4)).toBeUndefined();
+    expect(getDiscardedCount("boom")).toBeUndefined();
+    expect(getDiscardedCount(null)).toBeUndefined();
+  });
+
+  it("drops the count rather than the failure when the value cannot carry one", () => {
+    const frozen = Object.freeze(new Error("frozen"));
+    expect(() => withDiscardedCount(frozen, 4)).not.toThrow();
+    expect(getDiscardedCount(frozen)).toBeUndefined();
+  });
+
+  it("ignores a plain discardedCount field on an unrelated object", () => {
+    expect(getDiscardedCount({ discardedCount: 5 })).toBeUndefined();
   });
 });
 

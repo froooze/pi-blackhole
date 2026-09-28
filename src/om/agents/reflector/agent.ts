@@ -33,7 +33,11 @@ import {
 } from "../../ledger/index.js";
 import type { ReflectionCoverageTier } from "../dropper/coverage.js";
 import { debugLog } from "../../debug-log.js";
-import { isDeterministicError, WorkerStreamError } from "../../retryable-error.js";
+import {
+  isDeterministicError,
+  withDiscardedCount,
+  WorkerStreamError,
+} from "../../retryable-error.js";
 
 interface RunReflectorArgs {
   model: Model<any>;
@@ -279,20 +283,26 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   const streamFn = args.streamFn ?? bridgeStreamFn;
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
-  for await (const event of stream) {
-    // Tool execution collects records.
-    if (event.type === "agent_end") {
-      const msgs = ((event as any).messages || []) as Array<{
-        stopReason?: string;
-        errorMessage?: string;
-      }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
+  try {
+    for await (const event of stream) {
+      // Tool execution collects records.
+      if (event.type === "agent_end") {
+        const msgs = ((event as any).messages || []) as Array<{
+          stopReason?: string;
+          errorMessage?: string;
+        }>;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.stopReason === "error") {
+          agentError = lastMsg.errorMessage ?? "Unknown API error";
+        }
       }
     }
+    await stream.result();
+  } catch (error) {
+    // A stream that breaks outright never emits agent_end, so the guard below
+    // never sees it — yet the run still holds everything recorded so far.
+    throw withDiscardedCount(error, accumulated.size);
   }
-  await stream.result();
 
   // The stage records these reflections and advances the reflector cursor to
   // the observation coverage marker, so a partial review reported as success

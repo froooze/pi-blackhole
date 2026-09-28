@@ -14,6 +14,7 @@ import {
   runObserver,
 } from "../src/om/agents/observer/agent.js";
 import {
+  getDiscardedCount,
   isDeterministicError,
   isRetryableError,
   WorkerStreamError,
@@ -1020,6 +1021,46 @@ describe("runObserver", () => {
     }).catch((caught: unknown) => caught);
 
     expect(error).toMatchObject({ message: "Observer API error: Stream connection severed" });
+  });
+
+  // A stream that breaks outright never produces agent_end, so the guard above
+  // never runs — but the run still holds the records it had already taken.
+  function throwingLoop(
+    batches: Array<{ observations: unknown[]; complete?: boolean }>,
+    failure: unknown,
+  ) {
+    return ((_prompts: any[], context: any) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const [index, batch] of batches.entries()) {
+          await context.tools[0].execute(`call-${index}`, batch);
+        }
+        throw failure;
+      },
+      result: async () => ({}),
+    })) as any;
+  }
+
+  it("reports the records a raw stream failure discarded", async () => {
+    const failure = new Error("stream blew up");
+    const error = await runObserver({
+      ...baseArgs,
+      agentLoop: throwingLoop([{ observations: [terseObservation], complete: false }], failure),
+    }).catch((caught: unknown) => caught);
+
+    // Rethrown unchanged: the stage switches on the identity of stale-context
+    // and timeout errors, so wrapping this would send it down the cooldown path.
+    expect(error).toBe(failure);
+    expect(getDiscardedCount(error)).toBe(1);
+  });
+
+  it("reports a zero count when the stream fails before anything was recorded", async () => {
+    const failure = new Error("stream blew up");
+    const error = await runObserver({ ...baseArgs, agentLoop: throwingLoop([], failure) }).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBe(failure);
+    expect(getDiscardedCount(error)).toBe(0);
   });
 });
 

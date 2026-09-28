@@ -63,9 +63,47 @@ export class WorkerStreamError extends Error {
   }
 }
 
+/**
+ * A symbol rather than a field so the count cannot collide with an error's own
+ * properties and cannot surface when the error is spread into a log payload.
+ */
+const DISCARDED_COUNT = Symbol.for("pi-blackhole.discardedCount");
+
+function isAttachable(value: unknown): value is object {
+  return value !== null && (typeof value === "object" || typeof value === "function");
+}
+
+/**
+ * Attach the count of records a run is discarding to the value it is
+ * rethrowing, then return that value unchanged. Deliberately not wrapped in
+ * `WorkerStreamError`: the consolidation stage's catch switches on the identity
+ * of stale-context and timeout errors, and replacing one with a stream error
+ * would send it down the cooldown path instead of aborting or breaking.
+ */
+export function withDiscardedCount<T>(thrown: T, count: number): T {
+  if (isAttachable(thrown)) {
+    try {
+      Object.defineProperty(thrown, DISCARDED_COUNT, {
+        value: count,
+        enumerable: false,
+        configurable: true,
+      });
+    } catch {
+      // Frozen or proxy-blocked: losing the count costs less than losing the
+      // failure it describes.
+    }
+  }
+  return thrown;
+}
+
 /** Records a worker stream error discarded, or undefined for any other error. */
 export function getDiscardedCount(error: unknown): number | undefined {
-  return error instanceof WorkerStreamError ? error.discardedCount : undefined;
+  if (error instanceof WorkerStreamError) return error.discardedCount;
+  if (isAttachable(error)) {
+    const attached: unknown = Reflect.get(error, DISCARDED_COUNT);
+    if (typeof attached === "number") return attached;
+  }
+  return undefined;
 }
 
 /** Check whether an error is a deterministic client error (see above). */
