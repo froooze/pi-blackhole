@@ -91,7 +91,8 @@ export interface UnifiedConfig {
   /** Unified compaction control: "auto" | "manual" | "off".
    *  "auto"   — auto-trigger on compactAfterTokens threshold
    *  "manual"  — only via /blackhole command
-   *  "off"    — never compact (disables auto + blocks /blackhole) */
+   *  "off"    — never auto-compact and never own Pi's own /compact; an explicit
+   *             /blackhole still runs the blackhole pipeline (see CONFIG.md) */
   compaction: "auto" | "manual" | "off";
 
   /** Which engine handles compaction.
