@@ -21,7 +21,11 @@ import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
-import { withDiscardedCount, WorkerStreamError } from "../../retryable-error.js";
+import {
+  withDiscardedCount,
+  WorkerStreamError,
+  workerStreamErrorMessage,
+} from "../../retryable-error.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { reflectionToSummaryLine, type Observation, type Reflection } from "../../ledger/index.js";
 import { DROPPER_SYSTEM } from "./prompts.js";
@@ -417,7 +421,10 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   // covers, so a failure discards the prefix rather than publishing it as a
   // finished evaluation.
   if (agentError) {
-    throw new WorkerStreamError(`Dropper API error: ${agentError}`, proposedDropIds.length);
+    throw new WorkerStreamError(
+      workerStreamErrorMessage("Dropper", agentError),
+      proposedDropIds.length,
+    );
   }
 
   // The cap ended the run mid-evaluation for the same reason. The message names

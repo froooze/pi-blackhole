@@ -22,6 +22,7 @@ import {
   isRetryableError,
   isStaleExtensionContextError,
   WorkerStreamError,
+  workerStreamErrorMessage,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
@@ -899,16 +900,24 @@ export async function runObserverStage(
       // cooldown the catch below applies, so the next cycle falls back instead
       // of reporting success forever; a transient one only warns, since the
       // model just produced a usable close. The error is classified with the
-      // same `Observer API error:` prefix the throw path uses, so a bare
-      // provider code such as `401` is deterministic on both paths.
+      // same framing the throw path builds, so a bare provider code such as
+      // `401` is deterministic on both paths and the two cannot drift apart.
       if (result.errorAfterClose) {
-        const afterClose = new Error(`Observer API error: ${result.errorAfterClose}`);
+        const afterClose = new Error(workerStreamErrorMessage("Observer", result.errorAfterClose));
         const deterministic = isDeterministicError(afterClose);
-        // A cooldown only reaches the cooldown file when the model has a window:
-        // a cooldownHours: 0 candidate is skipped in-memory for this stage only,
-        // while the session model is cooled by recordDeterministicError below.
+        // The toast must describe what was actually written, not what the
+        // classification implies: a cooldownHours: 0 candidate is only skipped
+        // in-memory for this stage (failedInCycle, cleared next cycle), and a
+        // session model whose resolved model has no provider/id never reaches
+        // the cooldown file at all — recordDeterministicError keys it on both.
+        const sessionIdentity: { provider?: unknown; id?: unknown } | null | undefined =
+          resolved.model;
         const cooled =
-          deterministic && (!stageModelForThinking || stageModelForThinking.cooldownHours !== 0);
+          deterministic &&
+          (stageModelForThinking
+            ? stageModelForThinking.cooldownHours !== 0
+            : typeof sessionIdentity?.provider === "string" &&
+              typeof sessionIdentity?.id === "string");
         debugLog("observer.error_after_close", {
           error: result.errorAfterClose,
           deterministic,

@@ -816,6 +816,22 @@ describe("runObserver", () => {
     expect(result.errorAfterClose).toBe("Stream connection severed");
   });
 
+  // `complete=true` is the model's declaration that the chunk is fully covered,
+  // whatever size that batch arrived in: an empty close after a partial batch
+  // means "nothing further is worth recording", not "discard what I recorded".
+  it("keeps an earlier partial batch when the run closes with an empty complete=true", async () => {
+    const result = await runObserver({
+      ...baseArgs,
+      agentLoop: trailingErrorLoop([
+        { observations: [terseObservation], complete: false },
+        { observations: [], complete: true },
+      ]),
+    });
+
+    expect(result.observations).toHaveLength(1);
+    expect(result.errorAfterClose).toBe("Stream connection severed");
+  });
+
   it("keeps the close when a later complete=false batch is empty (no stall on hosts that ignore terminate)", async () => {
     const result = await runObserver({
       ...baseArgs,

@@ -42,6 +42,27 @@ const BARE_DETERMINISTIC_CODE_RE = /(?:^|[\s:([{="'])(40[014]|403|422)\b/;
 const DETERMINISTIC_SIGNAL_RE =
   /error|fail|missing|forbidden|denied|bad request|not found|unauthorized|invalid/i;
 
+/** Workers whose own framing is prepended to provider error text. */
+const WORKER_NAMES = ["Observer", "Reflector", "Dropper"] as const;
+
+/** One of the consolidation workers whose messages reach the classifier. */
+export type ConsolidationWorker = (typeof WORKER_NAMES)[number];
+
+/**
+ * Build `<worker> API error: <provider text>`. The framing is stripped again
+ * in `isDeterministicError`, so building and stripping both read
+ * `WORKER_NAMES` and cannot drift apart the way two literals would.
+ */
+export function workerStreamErrorMessage(
+  worker: ConsolidationWorker,
+  providerText: string,
+): string {
+  return `${worker} API error: ${providerText}`;
+}
+
+/** The framing `workerStreamErrorMessage` adds, anchored at the start only. */
+const WORKER_FRAMING_RE = new RegExp(`^(?:${WORKER_NAMES.join("|")}) API error: `);
+
 /**
  * A consolidation worker (observer, reflector, dropper) run that ended before
  * it settled its work, discarding whatever it had already recorded. The message
@@ -110,7 +131,17 @@ export function getDiscardedCount(error: unknown): number | undefined {
 export function isDeterministicError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error || "");
   if (DETERMINISTIC_ERROR_RE.test(message)) return true;
-  return BARE_DETERMINISTIC_CODE_RE.test(message) && DETERMINISTIC_SIGNAL_RE.test(message);
+  // The worker's `… API error: ` framing is not provider text. Leaving it in
+  // would let the word "error" satisfy DETERMINISTIC_SIGNAL_RE on every message
+  // these workers produce, so BARE_DETERMINISTIC_CODE_RE alone would decide and
+  // a status-shaped token anywhere in the body (`processed 401 rows`) would cool
+  // the model for an hour. DETERMINISTIC_ERROR_RE above still sees the framing,
+  // which is what makes a bare code that *opens* the provider text — a status
+  // line — read as the status it is.
+  const providerText = message.replace(WORKER_FRAMING_RE, "");
+  return (
+    BARE_DETERMINISTIC_CODE_RE.test(providerText) && DETERMINISTIC_SIGNAL_RE.test(providerText)
+  );
 }
 
 /**

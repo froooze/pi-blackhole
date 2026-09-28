@@ -1289,6 +1289,30 @@ describe("observer error after a kept close", () => {
     );
   });
 
+  test("a bare retryable code is not treated as deterministic", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("429");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
+  test("a status-shaped token count is not treated as a status code", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("processed 401 rows");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
   test("a deterministic error on the session model cools that model down", async () => {
     const { fixture, retryable } = keptCloseFixture("HTTP 401 Unauthorized");
     const sessionModel = { provider: "test", id: "session", contextWindow: 1_000_000 };
@@ -1311,6 +1335,24 @@ describe("observer error after a kept close", () => {
       expect.objectContaining({ message: "Observer API error: HTTP 401 Unauthorized" }),
       "observer",
     );
+  });
+
+  test("a session model with no coolable identity does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptCloseFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("no cooldown recorded"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("details in cooldown log"))).toBe(false);
   });
 
   test("a transient error keeps the chunk and only warns", async () => {

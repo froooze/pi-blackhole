@@ -87,6 +87,30 @@ describe("deterministic client errors", () => {
     );
   });
 
+  // The workers prefix provider text with `<worker> API error: `. That word is
+  // ours, not the provider's, so it must not stand in for the signal word the
+  // bare-code branch requires.
+  it("does not let a worker's own framing supply the signal word", () => {
+    expect(isDeterministicError(new Error("Observer API error: processed 401 rows"))).toBe(false);
+    expect(
+      isDeterministicError(new Error("Reflector API error: prompt returned 403 candidates")),
+    ).toBe(false);
+    expect(isDeterministicError(new Error("Dropper API error: kept 422 rows"))).toBe(false);
+  });
+
+  it("still classifies a real status behind a worker's framing", () => {
+    expect(isDeterministicError(new Error("Observer API error: 401"))).toBe(true);
+    expect(
+      isDeterministicError(new Error("Observer API error: 403 RegionError: model not available")),
+    ).toBe(true);
+    expect(isDeterministicError(new Error("Reflector API error: request failed with 404"))).toBe(
+      true,
+    );
+    expect(
+      isDeterministicError(new Error("Dropper API error: invalid model, got 400 Bad Request")),
+    ).toBe(true);
+  });
+
   it("does not mistake token counts or plain prose for status codes", () => {
     // Bare numbers without error framing must not match (e.g. progress lines
     // like "~401-token chunk" flow through nearby logging, never as errors,

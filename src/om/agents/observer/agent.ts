@@ -26,7 +26,11 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
-import { withDiscardedCount, WorkerStreamError } from "../../retryable-error.js";
+import {
+  withDiscardedCount,
+  WorkerStreamError,
+  workerStreamErrorMessage,
+} from "../../retryable-error.js";
 
 interface RunObserverArgs {
   model: Model<any>;
@@ -394,7 +398,7 @@ ${conversation}`;
   if (agentError && !(closedByCompleteBatch && accumulated.size > 0)) {
     // The message stays byte-identical: isDeterministicError scans it for bare
     // 4xx codes, so an interpolated observation count could misclassify it.
-    throw new WorkerStreamError(`Observer API error: ${agentError}`, accumulated.size);
+    throw new WorkerStreamError(workerStreamErrorMessage("Observer", agentError), accumulated.size);
   }
 
   // The turn cap ended the run before the model ever closed the chunk: the

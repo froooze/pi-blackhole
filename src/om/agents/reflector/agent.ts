@@ -37,6 +37,7 @@ import {
   isDeterministicError,
   withDiscardedCount,
   WorkerStreamError,
+  workerStreamErrorMessage,
 } from "../../retryable-error.js";
 
 interface RunReflectorArgs {
@@ -311,7 +312,10 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   if (agentError && !(closedByCompleteBatch && accumulated.size > 0)) {
     // Byte-identical to the pre-existing message: isDeterministicError scans it
     // for bare 4xx codes, so an interpolated count could misclassify it.
-    throw new WorkerStreamError(`Reflector API error: ${agentError}`, accumulated.size);
+    throw new WorkerStreamError(
+      workerStreamErrorMessage("Reflector", agentError),
+      accumulated.size,
+    );
   }
 
   // The cap ended the run before the model closed the review. Throwing keeps
@@ -331,7 +335,9 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   if (agentError) {
     debugLog("reflector.error_after_close", {
       error: agentError,
-      deterministic: isDeterministicError(agentError),
+      // Classified with the framing the throw path uses: without it a bare
+      // provider code would log as transient here and deterministic there.
+      deterministic: isDeterministicError(workerStreamErrorMessage("Reflector", agentError)),
     });
   }
 
