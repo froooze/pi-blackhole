@@ -125,4 +125,34 @@ describe("createTurnCap", () => {
 
     expect(cap.exhausted).toBe(false);
   });
+
+  it("ends the run without exhaustion when the cap turn did no tool work", () => {
+    const cap = createTurnCap(1);
+    const quietTurn = { message: { stopReason: "stop" }, toolResults: [] };
+
+    expect(cap.finishTurn(quietTurn)).toEqual({ action: "end" });
+    expect(cap.exhausted).toBe(false);
+  });
+
+  it("reports exhaustion when the cap turn produced tool results", () => {
+    const cap = createTurnCap(1);
+    const workingTurn = { message: { stopReason: "toolUse" }, toolResults: [{}] };
+
+    expect(cap.finishTurn(workingTurn)).toEqual({ action: "end" });
+    expect(cap.exhausted).toBe(true);
+  });
+
+  it("leaves shouldStopAfterTurn undecided-exhaustion on a quiet cap turn", () => {
+    const cap = createTurnCap(1);
+    const quietTurn = { message: { stopReason: "stop" }, toolResults: [] };
+
+    expect(cap.shouldStopAfterTurn(quietTurn)).toBe(true);
+    expect(cap.exhausted).toBe(false);
+  });
+
+  it("assumes work when a legacy host omits toolResults", () => {
+    const cap = createTurnCap(1);
+    cap.finishTurn(completedTurn);
+    expect(cap.exhausted).toBe(true);
+  });
 });

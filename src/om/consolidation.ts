@@ -23,6 +23,7 @@ import {
   isStaleExtensionContextError,
   WorkerStreamError,
   workerStreamErrorMessage,
+  type ConsolidationWorker,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
@@ -663,6 +664,98 @@ export async function runConsolidationPipeline(
   });
 }
 
+// ── Kept-close error handling (observer + reflector) ─────────────────────────
+
+/**
+ * Classify and record a provider failure from a turn after a valid
+ * complete=true close that the worker kept.
+ *
+ * The close is kept, but the failure must not be silent: a deterministic
+ * error (bad key, removed model) gets the same cooldown the stage catch
+ * applies, so the next cycle falls back instead of reporting success forever;
+ * a transient one only warns, since the model just produced a usable close.
+ * The error is classified with the same framing the throw path builds
+ * (`workerStreamErrorMessage`), so a bare provider code such as `401` is
+ * deterministic on both paths and the two cannot drift apart.
+ *
+ * The toast names only the destination that was written, never the provider
+ * body (issue #80): a cooldownHours-0 candidate is only skipped in-memory for
+ * the stage, and a session model without provider/id never reaches the
+ * cooldown file (`recordDeterministicError` keys it on both), so the
+ * not-cooled branch claims no skip and no cooldown.
+ */
+function handleWorkerErrorAfterClose(args: {
+  runtime: Runtime;
+  ctx: ConsolidationCtx;
+  stage: "observer" | "reflector";
+  worker: ConsolidationWorker;
+  keptNoun: string;
+  errorText: string;
+  resolved: ResolvedModel;
+  stageModelForThinking: ConfiguredModel | undefined;
+  coverageId: string | undefined;
+}): void {
+  const {
+    runtime,
+    ctx,
+    stage,
+    worker,
+    keptNoun,
+    errorText,
+    resolved,
+    stageModelForThinking,
+    coverageId,
+  } = args;
+  const afterClose = new Error(workerStreamErrorMessage(worker, errorText));
+  const deterministic = isDeterministicError(afterClose);
+  // The toast must describe what was actually written: a cooldownHours-0
+  // candidate cools in-memory only, and a session model whose resolved model
+  // has no provider/id never reaches the cooldown file at all —
+  // recordDeterministicError keys it on both.
+  const sessionIdentity: { provider?: unknown; id?: unknown } | null | undefined = resolved.model;
+  const cooled =
+    deterministic &&
+    (stageModelForThinking
+      ? stageModelForThinking.cooldownHours !== 0
+      : typeof sessionIdentity?.provider === "string" && typeof sessionIdentity?.id === "string");
+  if (stage === "observer") {
+    debugLog("observer.error_after_close", {
+      error: errorText,
+      deterministic,
+      coversUpToId: coverageId,
+    });
+  } else {
+    debugLog("reflector.error_after_close", {
+      error: errorText,
+      deterministic,
+      observationCoverageId: coverageId,
+    });
+  }
+  if (deterministic) {
+    runtime.recordRetryableError(stageModelForThinking, afterClose, stage);
+    if (!stageModelForThinking) {
+      runtime.recordDeterministicError(resolved.model, afterClose, stage);
+    }
+  }
+  if (ctx.hasUI) {
+    // Issue #80: the error text can be a provider body; it goes to the
+    // cooldown/debug log only, never into the toast. The pointer itself
+    // must be true too, so it names only a destination that was written.
+    ctx.ui?.notify(
+      `Observational memory: ${stage} kept its ${keptNoun}, but a later turn failed (${
+        deterministic
+          ? cooled
+            ? "deterministic error, model cooled down; details in cooldown log"
+            : "deterministic error; no cooldown recorded"
+          : runtime.config.debugLog === true
+            ? "transient error; details in debug log"
+            : "transient error; enable debugLog for details"
+      })`,
+      "warning",
+    );
+  }
+}
+
 // ── Observer stage (with fallback) ──────────────────────────────────────────
 
 export async function runObserverStage(
@@ -895,57 +988,20 @@ export async function runObserverStage(
       if (!runtime.isGenerationActive(generation)) return "abort";
 
       // The run closed the chunk and then a later turn failed (a host that
-      // ignores `terminate`). The close is kept, but the failure must not be
-      // silent: a deterministic error (bad key, removed model) gets the same
-      // cooldown the catch below applies, so the next cycle falls back instead
-      // of reporting success forever; a transient one only warns, since the
-      // model just produced a usable close. The error is classified with the
-      // same framing the throw path builds, so a bare provider code such as
-      // `401` is deterministic on both paths and the two cannot drift apart.
+      // ignores `terminate`). Shared with the reflector stage: same framing,
+      // same cooldown, same toast shape.
       if (result.errorAfterClose) {
-        const afterClose = new Error(workerStreamErrorMessage("Observer", result.errorAfterClose));
-        const deterministic = isDeterministicError(afterClose);
-        // The toast must describe what was actually written, not what the
-        // classification implies: a cooldownHours: 0 candidate is only skipped
-        // in-memory for this stage (failedInCycle, cleared next cycle), and a
-        // session model whose resolved model has no provider/id never reaches
-        // the cooldown file at all — recordDeterministicError keys it on both.
-        const sessionIdentity: { provider?: unknown; id?: unknown } | null | undefined =
-          resolved.model;
-        const cooled =
-          deterministic &&
-          (stageModelForThinking
-            ? stageModelForThinking.cooldownHours !== 0
-            : typeof sessionIdentity?.provider === "string" &&
-              typeof sessionIdentity?.id === "string");
-        debugLog("observer.error_after_close", {
-          error: result.errorAfterClose,
-          deterministic,
-          coversUpToId,
+        handleWorkerErrorAfterClose({
+          runtime,
+          ctx,
+          stage: "observer",
+          worker: "Observer",
+          keptNoun: "completed chunk",
+          errorText: result.errorAfterClose,
+          resolved,
+          stageModelForThinking,
+          coverageId: coversUpToId,
         });
-        if (deterministic) {
-          runtime.recordRetryableError(stageModelForThinking, afterClose, "observer");
-          if (!stageModelForThinking) {
-            runtime.recordDeterministicError(resolved.model, afterClose, "observer");
-          }
-        }
-        if (ctx.hasUI) {
-          // Issue #80: the error text can be a provider body; it goes to the
-          // cooldown/debug log only, never into the toast. The pointer itself
-          // must be true too, so it names only a destination that was written.
-          ctx.ui?.notify(
-            `Observational memory: observer kept its completed chunk, but a later turn failed (${
-              deterministic
-                ? cooled
-                  ? "deterministic error, model cooled down; details in cooldown log"
-                  : "deterministic error, model skipped for this cycle; no cooldown recorded"
-                : runtime.config.debugLog === true
-                  ? "transient error; details in debug log"
-                  : "transient error; enable debugLog for details"
-            })`,
-            "warning",
-          );
-        }
       }
 
       if (result.observations && result.observations.length > 0) {
@@ -1232,7 +1288,7 @@ async function runReflectorStage(
       );
 
       const { runReflector } = await import("./agents/reflector/agent.js");
-      const reflections = await runWorkerAttempt(
+      const result = await runWorkerAttempt(
         "reflector",
         runtime.config.workerAttemptTimeoutMs,
         generation.signal,
@@ -1262,6 +1318,24 @@ async function runReflectorStage(
       if (!runtime.isGenerationActive(generation))
         return { outcome: "abort", sameRunReflections: [] };
 
+      // A kept close carries the trailing failure with it (mirroring the
+      // observer): transient warns only, deterministic cools the model so the
+      // next cycle falls back instead of burning one more full attempt.
+      if (result.errorAfterClose) {
+        handleWorkerErrorAfterClose({
+          runtime,
+          ctx,
+          stage: "reflector",
+          worker: "Reflector",
+          keptNoun: "completed review",
+          errorText: result.errorAfterClose,
+          resolved,
+          stageModelForThinking,
+          coverageId: observationCoverageId,
+        });
+      }
+
+      const reflections = result.reflections;
       if (!reflections || reflections.length === 0) {
         runtime.advanceCursor(
           "reflector",

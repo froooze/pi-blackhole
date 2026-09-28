@@ -955,6 +955,7 @@ beforeEach(() => {
     emptyReason: { kind: "no_new_content" as const },
   });
   agents.runReflector.mockReset();
+  agents.runReflector.mockResolvedValue({ reflections: [] });
   agents.runDropper.mockReset();
 });
 
@@ -1223,7 +1224,7 @@ describe("worker attempt hard timeout", () => {
     fixture.runtime.config.reflectAfterTokens = 100;
     fixture.runtime.config.workerAttemptTimeoutMs = 100;
     // Reflector resolves and completes empty so the pipeline reaches the dropper.
-    agents.runReflector.mockResolvedValue([]);
+    agents.runReflector.mockResolvedValue({ reflections: [] });
     agents.runDropper.mockImplementation((input) => {
       const signal = input.signal;
       if (!signal) return Promise.reject(new Error("dropper did not receive an attempt signal"));
@@ -1407,7 +1408,171 @@ describe("observer error after a kept close", () => {
     await fixture.run();
 
     expect(notices).toContainEqual({
-      message: expect.stringContaining("model skipped for this cycle"),
+      message: expect.stringContaining("no cooldown recorded"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("cooldown log"))).toBe(false);
+  });
+});
+
+describe("reflector error after a kept close", () => {
+  function keptReviewFixture(errorAfterClose: string) {
+    const notices: Array<{ message: string; level?: string }> = [];
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100_000,
+      notify: (message, level) => notices.push({ message, level }),
+      entries: [
+        rawMessage("big-1", "x".repeat(40_000)),
+        observationsRecordedEntry("obs-1", {
+          coversUpToId: "big-1",
+          observations: [observation("aaaaaaaaaaaa", { tokenCount: 25 })],
+        }),
+      ],
+    });
+    fixture.runtime.config.reflectAfterTokens = 100;
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    const deterministic = vi
+      .spyOn(fixture.runtime, "recordDeterministicError")
+      .mockImplementation(() => {});
+    agents.runReflector.mockResolvedValue({
+      reflections: [reflection("rrrrrrrrrrrr", ["aaaaaaaaaaaa"])],
+      errorAfterClose,
+    });
+    return { fixture, notices, retryable, deterministic };
+  }
+
+  test("a deterministic error keeps the review and cools the model down", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("HTTP 401 Unauthorized");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("reflector")).toEqual({
+      entryId: "big-1",
+      state: "recorded",
+    });
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "Reflector API error: HTTP 401 Unauthorized" }),
+      "reflector",
+    );
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (deterministic error"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("Unauthorized"))).toBe(false);
+  });
+
+  test("a bare status code is classified like the throw path", async () => {
+    const { fixture, retryable } = keptReviewFixture("401");
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "Reflector API error: 401" }),
+      "reflector",
+    );
+  });
+
+  test("a bare retryable code is not treated as deterministic", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("429");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
+  test("a status-shaped token count is not treated as a status code", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("processed 401 rows");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
+  test("a deterministic error on the session model cools that model down", async () => {
+    const { fixture, retryable, deterministic } = keptReviewFixture("HTTP 401 Unauthorized");
+    const sessionModel = { provider: "test", id: "session", contextWindow: 1_000_000 };
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: sessionModel,
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("reflector")).toEqual({
+      entryId: "big-1",
+      state: "recorded",
+    });
+    expect(retryable).toHaveBeenCalledWith(undefined, expect.any(Error), "reflector");
+    expect(deterministic).toHaveBeenCalledWith(
+      sessionModel,
+      expect.objectContaining({ message: "Reflector API error: HTTP 401 Unauthorized" }),
+      "reflector",
+    );
+  });
+
+  test("a session model with no coolable identity does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptReviewFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("no cooldown recorded"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("details in cooldown log"))).toBe(false);
+  });
+
+  test("a transient error keeps the review and only warns", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("Stream connection severed");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("reflector")).toEqual({
+      entryId: "big-1",
+      state: "recorded",
+    });
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("severed"))).toBe(false);
+  });
+
+  test("a cooldownHours-0 candidate does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptReviewFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "candidate" as const,
+      candidateConfig: { provider: "test", id: "model", cooldownHours: 0 },
+      model: { provider: "test", id: "model", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("no cooldown recorded"),
       level: "warning",
     });
     expect(notices.some((n) => n.message.includes("cooldown log"))).toBe(false);
@@ -1524,7 +1689,7 @@ describe("dropper turn-cap exhaustion", () => {
 
   test("a session model that exhausts the cap is not retried within the stage", async () => {
     const fixture = workerStageFixture("session");
-    agents.runReflector.mockResolvedValue([]);
+    agents.runReflector.mockResolvedValue({ reflections: [] });
     agents.runDropper.mockRejectedValue(turnCapError());
 
     await fixture.run();
@@ -1534,7 +1699,7 @@ describe("dropper turn-cap exhaustion", () => {
 
   test("a candidate that exhausts the cap cools down and the fallback is tried", async () => {
     const fixture = workerStageFixture("candidate");
-    agents.runReflector.mockResolvedValue([]);
+    agents.runReflector.mockResolvedValue({ reflections: [] });
     const retryable = vi
       .spyOn(fixture.runtime, "recordRetryableError")
       .mockImplementation(() => {});
@@ -1558,7 +1723,9 @@ describe("worker stream options", () => {
     agents.runObserver.mockResolvedValue({
       observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["big-1"], tokenCount: 8_000 })],
     });
-    agents.runReflector.mockResolvedValue([reflection("rrrrrrrrrrrr", ["aaaaaaaaaaaa"])]);
+    agents.runReflector.mockResolvedValue({
+      reflections: [reflection("rrrrrrrrrrrr", ["aaaaaaaaaaaa"])],
+    });
     agents.runDropper.mockResolvedValue([]);
 
     await fixture.run();
@@ -2246,7 +2413,7 @@ describe("showWorkerNotifications", () => {
   test("emits the reflector progress toast by default", async () => {
     const notify = vi.fn();
     const fixture = reflectorFixture(notify);
-    agents.runReflector.mockResolvedValue([]);
+    agents.runReflector.mockResolvedValue({ reflections: [] });
 
     await fixture.run();
 
@@ -2261,7 +2428,7 @@ describe("showWorkerNotifications", () => {
     const notify = vi.fn();
     const fixture = reflectorFixture(notify);
     fixture.runtime.config.showWorkerNotifications = false;
-    agents.runReflector.mockResolvedValue([]);
+    agents.runReflector.mockResolvedValue({ reflections: [] });
 
     await fixture.run();
 

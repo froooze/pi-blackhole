@@ -3,10 +3,11 @@
  *
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/agents/observer/agent.ts)
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
- * and throws unless the run already closed the chunk with a valid, non-empty
- * complete=true batch, so the consolidation pipeline can fall back to another
- * model instead of advancing coversUpToId over a half-observed chunk. The same
- * guard covers a run the agent turn cap cut off mid-chunk.
+ * and throws unless the run already closed the chunk with a valid
+ * complete=true batch that recorded observations, so the consolidation
+ * pipeline can fall back to another model instead of advancing coversUpToId
+ * over a half-observed chunk. The same guard covers a run the agent turn cap
+ * cut off mid-chunk.
  */
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -405,8 +406,10 @@ ${conversation}`;
   // partial batch is not completed coverage, so returning it as success would
   // advance coversUpToId and silently drop the tail of the chunk. Throwing
   // keeps the cursor where it is and lets the stage's fallback chain retry.
-  // A valid non-empty close already settled the chunk, so a cap firing after it
-  // changes nothing. The message names no status code: this is a config limit,
+  // A valid close that recorded something already settled the chunk, so a cap
+  // firing after it changes nothing; a cap firing before anything was recorded
+  // is still an empty success (the stage advances the cursor as "empty"). The
+  // message names no status code: this is a config limit,
   // not a provider failure, so it must not cool a session model as deterministic.
   if (turnCap?.exhausted && accumulated.size > 0 && !closedByCompleteBatch) {
     throw new WorkerStreamError(

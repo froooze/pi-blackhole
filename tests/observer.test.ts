@@ -938,6 +938,7 @@ describe("runObserver", () => {
     batches: Array<{ observations: unknown[]; complete?: boolean }>,
     capEndsRun = true,
     agentError?: string,
+    quietTail = false,
   ) {
     return ((_prompts: any[], context: any, config: any) => ({
       async *[Symbol.asyncIterator]() {
@@ -947,7 +948,11 @@ describe("runObserver", () => {
         if (capEndsRun) {
           // The host enforces the cap after the completed turn; it does not
           // know or care that the run never closed the chunk.
-          config.finishTurn?.({ message: { stopReason: "toolUse" } });
+          config.finishTurn?.(
+            quietTail
+              ? { message: { stopReason: "stop" }, toolResults: [] }
+              : { message: { stopReason: "toolUse" } },
+          );
         }
         if (agentError !== undefined) {
           yield {
@@ -1012,6 +1017,22 @@ describe("runObserver", () => {
 
     expect(result.observations).toBeUndefined();
     expect(result.emptyReason).toEqual({ kind: "tool_not_called" });
+  });
+
+  it("keeps a partial batch when the cap turn did no tool work", async () => {
+    const result = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop(
+        [{ observations: [terseObservation], complete: false }],
+        true,
+        undefined,
+        true,
+      ),
+      maxTurns: 1,
+    });
+
+    expect(result.observations).toHaveLength(1);
+    expect(result.errorAfterClose).toBeUndefined();
   });
 
   it("keeps a non-closed partial batch when the turn cap never fires", async () => {

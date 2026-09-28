@@ -21,6 +21,12 @@ import type { AgentTurnDecision } from "@earendil-works/pi-agent-core";
 /** Completed-turn payload shared by Pi 0.86 `ShouldStopAfterTurnContext` and 0.87 `AgentTurnContext`. */
 export interface TurnCapContext {
   message?: { stopReason?: string };
+  /**
+   * Tool results produced by the ended turn. Pi 0.87 populates this on every
+   * `finishTurn` call (empty when the model produced no tool calls); a legacy
+   * 0.86 host may omit it, in which case the cap assumes the turn did work.
+   */
+  toolResults?: readonly unknown[];
 }
 
 /** Pi <= 0.86 turn hook. Absent from the 0.87 `AgentLoopConfig` type, like the loop's `fetch` option. */
@@ -34,9 +40,13 @@ export interface TurnCap {
   /** Pi 0.87 hook: `{ action: "end" }` ends the run, `undefined` keeps normal scheduling. */
   finishTurn: (context: TurnCapContext) => AgentTurnDecision | undefined;
   /**
-   * True once either hook has ended the run by spending the last turn of the
-   * budget. Hard-exited turns (`error`/`aborted`) never set it: the loop ends
-   * those runs itself, so the cap was not the cause.
+   * True once either hook has ended the run on a turn that did tool work.
+   * Hard-exited turns (`error`/`aborted`) never set it: the loop ends
+   * those runs itself, so the cap was not the cause. A cap turn with no tool
+   * results (the model stopped naturally on exactly its last allowed turn)
+   * also leaves it unset: the run still ends, but downstream must read it as
+   * a natural stop, not as the cap cutting off pending work. A legacy host
+   * that omits `toolResults` is assumed to have done work (previous behavior).
    */
   readonly exhausted: boolean;
 }
@@ -66,19 +76,28 @@ export function createTurnCap(maxTurns: number): TurnCap {
     return stopReason === "error" || stopReason === "aborted";
   };
 
+  // A turn that produced no tool results is a model that stopped on its own,
+  // not pending work the cap truncated. Pi 0.87 always sends `toolResults`
+  // (possibly empty); a host that omits the field predates the distinction,
+  // so assume work to preserve the previous behavior there.
+  const didToolWork = (context: TurnCapContext): boolean => {
+    if (!("toolResults" in context) || context.toolResults === undefined) return true;
+    return context.toolResults.length > 0;
+  };
+
   return {
     shouldStopAfterTurn: (context) => {
       if (hardExited(context)) return false;
       legacyTurns++;
       if (legacyTurns < maxTurns) return false;
-      exhausted = true;
+      if (didToolWork(context)) exhausted = true;
       return true;
     },
     finishTurn: (context) => {
       if (hardExited(context)) return undefined;
       finishTurns++;
       if (finishTurns < maxTurns) return undefined;
-      exhausted = true;
+      if (didToolWork(context)) exhausted = true;
       return { action: "end" };
     },
     get exhausted() {

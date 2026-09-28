@@ -7,25 +7,9 @@
  * success: the observations behind them would never be crystallized again.
  */
 
-import { describe, expect, it, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-const testRoot = join(tmpdir(), `pi-blackhole-reflector-stream-${process.pid}-${Date.now()}`);
-const agentDir = join(testRoot, "agent");
-
-vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
-  return { ...actual, getAgentDir: () => agentDir };
-});
+import { describe, expect, it } from "vitest";
 
 import { runReflector } from "../src/om/agents/reflector/agent.js";
-import {
-  DEBUG_LOG_RELATIVE_PATH,
-  flushDebugLog,
-  withDebugLogContext,
-} from "../src/om/debug-log.js";
 import {
   getDiscardedCount,
   isDeterministicError,
@@ -42,20 +26,6 @@ describe("runReflector failure guard", () => {
     observations: [observation("aaaaaaaaaaaa"), observation("bbbbbbbbbbbb")],
   };
 
-  afterEach(() => {
-    rmSync(testRoot, { recursive: true, force: true });
-  });
-
-  function readLog(): Array<{ event: string; data: Record<string, unknown> }> {
-    const path = join(agentDir, DEBUG_LOG_RELATIVE_PATH);
-    if (!existsSync(path)) return [];
-    return readFileSync(path, "utf-8")
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-  }
-
   function reflectionBatch(content: string, complete: boolean) {
     return {
       reflections: [{ content, supportingObservationIds: ["aaaaaaaaaaaa"] }],
@@ -69,7 +39,12 @@ describe("runReflector failure guard", () => {
    */
   function scriptedLoop(
     batches: ReadonlyArray<Record<string, unknown>>,
-    options: { capEndsRun?: boolean; agentError?: string; streamFailure?: unknown } = {},
+    options: {
+      capEndsRun?: boolean;
+      capQuietTail?: boolean;
+      agentError?: string;
+      streamFailure?: unknown;
+    } = {},
   ) {
     return ((_prompts: any[], context: any, config: any) => ({
       async *[Symbol.asyncIterator]() {
@@ -79,6 +54,9 @@ describe("runReflector failure guard", () => {
         if (options.streamFailure !== undefined) throw options.streamFailure;
         if (options.capEndsRun) {
           config.finishTurn?.({ message: { stopReason: "toolUse" } });
+        }
+        if (options.capQuietTail) {
+          config.finishTurn?.({ message: { stopReason: "stop" }, toolResults: [] });
         }
         if (options.agentError !== undefined) {
           yield {
@@ -131,30 +109,30 @@ describe("runReflector failure guard", () => {
       }),
     });
 
-    expect(result?.map((item) => item.content)).toEqual(["Closed reflection"]);
+    expect(result.reflections?.map((item) => item.content)).toEqual(["Closed reflection"]);
   });
 
-  it("logs the failure it kept after a valid close instead of swallowing it", async () => {
-    mkdirSync(agentDir, { recursive: true });
-    await withDebugLogContext({ enabled: true }, () =>
-      runReflector({
-        ...baseArgs,
-        agentLoop: scriptedLoop([reflectionBatch("Closed reflection", true)], {
-          agentError: "Stream connection severed",
-        }),
+  it("returns the trailing failure as errorAfterClose instead of swallowing it", async () => {
+    const result = await runReflector({
+      ...baseArgs,
+      agentLoop: scriptedLoop([reflectionBatch("Closed reflection", true)], {
+        agentError: "Stream connection severed",
       }),
-    );
-    flushDebugLog();
+    });
 
-    expect(readLog()).toEqual([
-      {
-        ts: expect.any(String),
-        event: "reflector.error_after_close",
-        cwd: undefined,
-        runId: undefined,
-        data: { error: "Stream connection severed", deterministic: false },
-      },
-    ]);
+    expect(result.errorAfterClose).toBe("Stream connection severed");
+  });
+
+  it("passes a bare provider code through errorAfterClose for stage classification", async () => {
+    const result = await runReflector({
+      ...baseArgs,
+      agentLoop: scriptedLoop([reflectionBatch("Closed reflection", true)], {
+        agentError: "401",
+      }),
+    });
+
+    expect(result.reflections).toHaveLength(1);
+    expect(result.errorAfterClose).toBe("401");
   });
 
   it("retracts the close when a later batch records new reflections", async () => {
@@ -195,17 +173,31 @@ describe("runReflector failure guard", () => {
       maxTurns: 1,
     });
 
-    expect(result?.map((item) => item.content)).toEqual(["Closed reflection"]);
+    expect(result.reflections?.map((item) => item.content)).toEqual(["Closed reflection"]);
+    expect(result.errorAfterClose).toBeUndefined();
   });
 
-  it("returns undefined when the turn cap cuts a run that recorded nothing", async () => {
+  it("keeps a partial batch when the cap turn did no tool work", async () => {
+    const result = await runReflector({
+      ...baseArgs,
+      agentLoop: scriptedLoop([reflectionBatch("Partial reflection", false)], {
+        capQuietTail: true,
+      }),
+      maxTurns: 1,
+    });
+
+    expect(result.reflections).toHaveLength(1);
+    expect(result.errorAfterClose).toBeUndefined();
+  });
+
+  it("returns undefined reflections when the turn cap cuts a run that recorded nothing", async () => {
     await expect(
       runReflector({
         ...baseArgs,
         agentLoop: scriptedLoop([], { capEndsRun: true }),
         maxTurns: 1,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ reflections: undefined });
   });
 
   it("does not classify turn-cap exhaustion as a provider error", async () => {

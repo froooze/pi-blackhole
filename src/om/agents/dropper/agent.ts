@@ -429,7 +429,8 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 
   // The cap ended the run mid-evaluation for the same reason. The message names
   // no status code: this is a config limit rather than a provider failure, so it
-  // must not cool a session model as deterministic.
+  // must not cool a session model as deterministic. A cap firing before any
+  // candidate was proposed is still an empty success (returns undefined).
   if (turnCap?.exhausted && proposedDropIds.length > 0) {
     throw new WorkerStreamError(
       `Dropper turn cap exhausted: ${proposedDropIds.length} drop candidate${proposedDropIds.length === 1 ? "" : "s"} recorded before the run ended`,

@@ -35,7 +35,12 @@ describe("runDropper failure guard", () => {
 
   function scriptedLoop(
     batches: ReadonlyArray<Record<string, unknown>>,
-    options: { capEndsRun?: boolean; agentError?: string; streamFailure?: unknown } = {},
+    options: {
+      capEndsRun?: boolean;
+      capQuietTail?: boolean;
+      agentError?: string;
+      streamFailure?: unknown;
+    } = {},
   ) {
     return ((_prompts: any[], context: any, config: any) => ({
       async *[Symbol.asyncIterator]() {
@@ -45,6 +50,9 @@ describe("runDropper failure guard", () => {
         if (options.streamFailure !== undefined) throw options.streamFailure;
         if (options.capEndsRun) {
           config.finishTurn?.({ message: { stopReason: "toolUse" } });
+        }
+        if (options.capQuietTail) {
+          config.finishTurn?.({ message: { stopReason: "stop" }, toolResults: [] });
         }
         if (options.agentError !== undefined) {
           yield {
@@ -79,6 +87,21 @@ describe("runDropper failure guard", () => {
     });
   });
 
+  it("has no kept-close path: a trailing error always throws instead of returning", async () => {
+    const error = await runDropper({
+      ...baseArgs,
+      agentLoop: scriptedLoop([{ ids: ["aaaaaaaaaaaa"] }], {
+        agentError: "Stream connection severed",
+      }),
+    }).catch((caught: unknown) => caught);
+
+    // `drop_observations` carries no complete flag, so unlike the observer and
+    // reflector there is no `errorAfterClose` to return — parity holds via the
+    // exception path, which the stage cools like any other worker failure.
+    expect(error).toBeInstanceOf(WorkerStreamError);
+    expect(error).not.toHaveProperty("errorAfterClose");
+  });
+
   it("carries a zero count when the run proposed nothing before the error", async () => {
     const error = await runDropper({
       ...baseArgs,
@@ -111,6 +134,16 @@ describe("runDropper failure guard", () => {
         maxTurns: 1,
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("keeps a complete evaluation that stopped naturally on its last allowed turn", async () => {
+    await expect(
+      runDropper({
+        ...baseArgs,
+        agentLoop: scriptedLoop([{ ids: ["aaaaaaaaaaaa"] }], { capQuietTail: true }),
+        maxTurns: 1,
+      }),
+    ).resolves.toEqual(["aaaaaaaaaaaa"]);
   });
 
   it("does not classify turn-cap exhaustion as a provider error", async () => {

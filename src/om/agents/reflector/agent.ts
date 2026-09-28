@@ -3,10 +3,13 @@
  *
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/agents/reflector/agent.ts)
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
- * and throws unless the run already closed the review with a valid, non-empty
- * complete=true batch, so the stage cannot advance the reflector cursor over
- * observations that were never crystallized. The same guard covers a run the
- * agent turn cap cut off mid-review.
+ * and throws unless the run already closed the review with a valid
+ * complete=true batch that recorded reflections, so the stage cannot advance
+ * the reflector cursor over observations that were never crystallized. The
+ * same guard covers a run the agent turn cap cut off mid-review. A trailing
+ * failure after a kept close is returned as `errorAfterClose` (mirroring the
+ * observer) so the stage can cool a deterministically broken model instead of
+ * only debug-logging it.
  */
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -32,9 +35,7 @@ import {
   type Reflection,
 } from "../../ledger/index.js";
 import type { ReflectionCoverageTier } from "../dropper/coverage.js";
-import { debugLog } from "../../debug-log.js";
 import {
-  isDeterministicError,
   withDiscardedCount,
   WorkerStreamError,
   workerStreamErrorMessage,
@@ -130,9 +131,19 @@ function normalizeReflectionContent(content: string): string | undefined {
   return normalized;
 }
 
-export async function runReflector(args: RunReflectorArgs): Promise<Reflection[] | undefined> {
+export interface ReflectorResult {
+  reflections: Reflection[] | undefined;
+  /**
+   * Provider error from a turn after a valid complete=true close. The run kept
+   * its result (the review was declared finished); the caller classifies and
+   * records it the same way the observer stage handles its own kept close.
+   */
+  errorAfterClose?: string;
+}
+
+export async function runReflector(args: RunReflectorArgs): Promise<ReflectorResult> {
   const { model, apiKey, headers, env, reflections, observations, signal } = args;
-  if (observations.length === 0) return undefined;
+  if (observations.length === 0) return { reflections: undefined };
 
   const allowedObservationIds = observations.map((observation) => observation.id);
   const existingReflectionIds = new Set(reflections.map((reflection) => reflection.id));
@@ -142,10 +153,14 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   // it already sent — they are counter semantics, not work still owed.
   let runRejected = 0;
   let runDuplicates = 0;
-  // Whether the run closed the review with a valid, non-empty complete=true
-  // batch. Same rule as the observer: a later clean close keeps it, a later
-  // batch that records or rejects anything retracts it, and a batch that only
-  // re-proposes already-recorded reflections changes nothing.
+  // Whether the run closed the review with a valid complete=true batch that
+  // recorded reflections. Same rule as the observer: a later clean close keeps
+  // it, a later batch that records or rejects anything retracts it, and a
+  // batch that only re-proposes already-recorded reflections changes nothing.
+  // An empty closing batch after a partial batch still counts as coverage —
+  // complete=true is what declares the review finished, not the size of the
+  // closing batch — but a close from a run that recorded nothing at all still
+  // throws, so a failing provider cannot turn each review into a silent skip.
   let closedByCompleteBatch = false;
 
   const recordReflections: AgentTool<typeof RecordReflectionsSchema> = {
@@ -308,7 +323,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   // The stage records these reflections and advances the reflector cursor to
   // the observation coverage marker, so a partial review reported as success
   // would leave the rest of those observations uncrystallized forever. Only a
-  // valid non-empty complete=true batch proves the review actually finished.
+  // valid complete=true close from a run that recorded something proves the
+  // review actually finished.
   if (agentError && !(closedByCompleteBatch && accumulated.size > 0)) {
     // Byte-identical to the pre-existing message: isDeterministicError scans it
     // for bare 4xx codes, so an interpolated count could misclassify it.
@@ -321,7 +337,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
   // The cap ended the run before the model closed the review. Throwing keeps
   // the cursor where it is; the message names no status code, because this is a
   // config limit rather than a provider failure and must not cool a session
-  // model as deterministic.
+  // model as deterministic. A cap firing before anything was recorded is still
+  // an empty success (the stage advances the cursor as "empty").
   if (turnCap?.exhausted && accumulated.size > 0 && !closedByCompleteBatch) {
     throw new WorkerStreamError(
       `Reflector turn cap exhausted: ${accumulated.size} reflection${accumulated.size === 1 ? "" : "s"} recorded with no complete=true close`,
@@ -330,18 +347,18 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
     );
   }
 
-  // A kept close is a kept result, not a kept secret: the trailing failure has
-  // nowhere else to surface now that the run is not throwing.
-  if (agentError) {
-    debugLog("reflector.error_after_close", {
-      error: agentError,
-      // Classified with the framing the throw path uses: without it a bare
-      // provider code would log as transient here and deterministic there.
-      deterministic: isDeterministicError(workerStreamErrorMessage("Reflector", agentError)),
-    });
-  }
+  // A kept close is a kept result with a surfaced failure: return the trailing
+  // error alongside the reflections so the stage can classify it with the same
+  // framing the throw path uses and cool a deterministically broken model. A
+  // cap firing before anything was recorded is still an empty success (the
+  // stage advances the cursor as "empty"); with recordings but no close the
+  // run throws above.
+  if (accumulated.size === 0) return { reflections: undefined };
 
-  return accumulated.size > 0 ? Array.from(accumulated.values()) : undefined;
+  return {
+    reflections: Array.from(accumulated.values()),
+    ...(agentError ? { errorAfterClose: agentError } : {}),
+  };
 }
 
 export function observationToReflectorLine(
