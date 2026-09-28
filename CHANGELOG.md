@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [0.5.10] - 2026-09-29
+
 ### Fixed
 
 - **`/blackhole` on a branch Pi considers ineligible now reports nothing-to-compact instead of failing.** Pi's `AgentSession.compact()` runs `prepareCompaction()` _before_ it emits `session_before_compact`, so a branch whose entries after the last boundary fit inside `keepRecentTokens` is refused by the host before any blackhole hook can run. The refusal surfaced twice — as Pi's error card (`reason: "manual"` always renders `Compaction failed: …`) and again as `Compaction failed: Nothing to compact (session too small)` from the command's `onError`, whose benign set covered only `Compaction cancelled` and `Already compacted`. The 0.5.4 eligibility fix gated the auto-compaction trigger but not this call site. The command now asks the host's own question via the new `getCompactionIneligibility()` before it mutates anything: an ineligible branch reports `blackhole: nothing to compact yet — Pi's keep-recent budget still covers this branch` (or `already compacted — …`) as information and returns, and the check sits above the pending-observational-memory flush so a refusal no longer appends entries, clears the pending buffer, and announces a flush that never compacted. `onError` keeps the same messages as a backstop for the case where our probe and the host still disagree.
