@@ -127,6 +127,25 @@ describe("deterministic client errors", () => {
   });
 });
 
+describe("retryable error classification", () => {
+  it("matches standalone status codes and real provider phrasing", () => {
+    expect(isRetryableError(new Error("429 Too Many Requests"))).toBe(true);
+    expect(isRetryableError(new Error("HTTP 503 Service Unavailable"))).toBe(true);
+    expect(isRetryableError(new Error("request failed with status 502"))).toBe(true);
+    expect(isRetryableError(new Error("429"))).toBe(true);
+  });
+
+  // The numeric alternatives must not match as substrings: token counts,
+  // row counts, and port-like numbers flow through the same logs and must
+  // not read as provider statuses on the retryable/cooldownWorthy axis.
+  it("does not match status codes embedded in larger numbers", () => {
+    expect(isRetryableError(new Error("processed 1500 tokens"))).toBe(false);
+    expect(isRetryableError(new Error("processed 5000 rows"))).toBe(false);
+    expect(isRetryableError(new Error("entry 14290 compacted"))).toBe(false);
+    expect(isRetryableError(new Error("all good"))).toBe(false);
+  });
+});
+
 describe("cooldown-worthy errors (transient OR deterministic)", () => {
   it("keeps transient failures cooldown-worthy", () => {
     expect(isCooldownWorthyError(new Error("429 Too Many Requests"))).toBe(true);

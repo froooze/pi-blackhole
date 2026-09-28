@@ -37,6 +37,7 @@ describe("runDropper failure guard", () => {
     batches: ReadonlyArray<Record<string, unknown>>,
     options: {
       capEndsRun?: boolean;
+      legacyCapEndsRun?: boolean;
       capQuietTail?: boolean;
       agentError?: string;
       streamFailure?: unknown;
@@ -50,6 +51,11 @@ describe("runDropper failure guard", () => {
         if (options.streamFailure !== undefined) throw options.streamFailure;
         if (options.capEndsRun) {
           config.finishTurn?.({ message: { stopReason: "toolUse" } });
+        }
+        // Legacy variant: drives shouldStopAfterTurn so the test fails if the
+        // agent stops spreading the 0.86 hook into its loop config.
+        if (options.legacyCapEndsRun) {
+          config.shouldStopAfterTurn?.({ message: { stopReason: "toolUse" } });
         }
         if (options.capQuietTail) {
           config.finishTurn?.({ message: { stopReason: "stop" }, toolResults: [] });
@@ -144,6 +150,37 @@ describe("runDropper failure guard", () => {
         maxTurns: 1,
       }),
     ).resolves.toEqual(["aaaaaaaaaaaa"]);
+  });
+
+  it("throws the trailing error rather than the turn cap when a capped run proposed nothing", async () => {
+    const error = await runDropper({
+      ...baseArgs,
+      agentLoop: scriptedLoop([], { capEndsRun: true, agentError: "Stream connection severed" }),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    // The provider error precedes the cap guard, so a capped run that also
+    // failed reports the failure (with its zero discarded count) instead of
+    // an empty success the stage would advance the cursor over.
+    expect(error).toBeInstanceOf(WorkerStreamError);
+    expect(error).toMatchObject({
+      message: "Dropper API error: Stream connection severed",
+      discardedCount: 0,
+    });
+  });
+
+  it("throws when the legacy turn-cap hook ends a run that proposed candidates", async () => {
+    const error = await runDropper({
+      ...baseArgs,
+      agentLoop: scriptedLoop([{ ids: ["aaaaaaaaaaaa"] }], { legacyCapEndsRun: true }),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(WorkerStreamError);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("turn cap"),
+      discardedCount: 1,
+    });
   });
 
   it("does not classify turn-cap exhaustion as a provider error", async () => {

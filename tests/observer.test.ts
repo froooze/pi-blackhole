@@ -939,6 +939,7 @@ describe("runObserver", () => {
     capEndsRun = true,
     agentError?: string,
     quietTail = false,
+    legacyHook = false,
   ) {
     return ((_prompts: any[], context: any, config: any) => ({
       async *[Symbol.asyncIterator]() {
@@ -947,12 +948,14 @@ describe("runObserver", () => {
         }
         if (capEndsRun) {
           // The host enforces the cap after the completed turn; it does not
-          // know or care that the run never closed the chunk.
-          config.finishTurn?.(
-            quietTail
-              ? { message: { stopReason: "stop" }, toolResults: [] }
-              : { message: { stopReason: "toolUse" } },
-          );
+          // know or care that the run never closed the chunk. The legacy
+          // variant drives shouldStopAfterTurn so the test fails if the agent
+          // stops spreading the 0.86 hook into its loop config.
+          const contextArg = quietTail
+            ? { message: { stopReason: "stop" }, toolResults: [] }
+            : { message: { stopReason: "toolUse" } };
+          if (legacyHook) config.shouldStopAfterTurn?.(contextArg);
+          else config.finishTurn?.(contextArg);
         }
         if (agentError !== undefined) {
           yield {
@@ -979,6 +982,28 @@ describe("runObserver", () => {
       maxTurns: 1,
     }).catch((caught: unknown) => caught);
 
+    expect(error).toBeInstanceOf(WorkerStreamError);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("turn cap"),
+      discardedCount: 1,
+    });
+  });
+
+  it("throws when the legacy turn-cap hook ends a run that never closed", async () => {
+    const error = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop(
+        [{ observations: [terseObservation], complete: false }],
+        true,
+        undefined,
+        false,
+        true,
+      ),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    // Drives shouldStopAfterTurn instead of finishTurn: fails if runObserver
+    // stops spreading the Pi 0.86 hook into its agent-loop config.
     expect(error).toBeInstanceOf(WorkerStreamError);
     expect(error).toMatchObject({
       message: expect.stringContaining("turn cap"),
@@ -1060,21 +1085,51 @@ describe("runObserver", () => {
     expect(error).toMatchObject({ message: "Observer API error: Stream connection severed" });
   });
 
+  it("throws on a trailing error even when the capped run recorded nothing", async () => {
+    const error = await runObserver({
+      ...baseArgs,
+      agentLoop: turnCapLoop([], true, "Stream connection severed"),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    // A trailing provider error beats the zero-record cap empty-success: the
+    // run never completed cleanly, so there is no genuine nothing-to-record
+    // outcome to advance the cursor over.
+    expect(error).toBeInstanceOf(WorkerStreamError);
+    expect(error).toMatchObject({
+      message: "Observer API error: Stream connection severed",
+      discardedCount: 0,
+    });
+  });
+
   // A stream that breaks outright never produces agent_end, so the guard above
   // never runs — but the run still holds the records it had already taken.
+  // A manual async iterator (not a generator) so the zero-event shape does
+  // not trip require-yield.
   function throwingLoop(
     batches: Array<{ observations: unknown[]; complete?: boolean }>,
     failure: unknown,
   ) {
-    return ((_prompts: any[], context: any) => ({
-      async *[Symbol.asyncIterator]() {
-        for (const [index, batch] of batches.entries()) {
-          await context.tools[0].execute(`call-${index}`, batch);
-        }
-        throw failure;
-      },
-      result: async () => ({}),
-    })) as any;
+    return ((_prompts: any[], context: any) => {
+      let broken = false;
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next: async (): Promise<IteratorResult<unknown>> => {
+              if (!broken) {
+                broken = true;
+                for (const [index, batch] of batches.entries()) {
+                  await context.tools[0].execute(`call-${index}`, batch);
+                }
+                throw failure;
+              }
+              return { done: true, value: undefined };
+            },
+          };
+        },
+        result: async () => ({}),
+      };
+    }) as any;
   }
 
   it("reports the records a raw stream failure discarded", async () => {

@@ -41,6 +41,7 @@ describe("runReflector failure guard", () => {
     batches: ReadonlyArray<Record<string, unknown>>,
     options: {
       capEndsRun?: boolean;
+      legacyCapEndsRun?: boolean;
       capQuietTail?: boolean;
       agentError?: string;
       streamFailure?: unknown;
@@ -54,6 +55,11 @@ describe("runReflector failure guard", () => {
         if (options.streamFailure !== undefined) throw options.streamFailure;
         if (options.capEndsRun) {
           config.finishTurn?.({ message: { stopReason: "toolUse" } });
+        }
+        // Legacy variant: drives shouldStopAfterTurn so the test fails if the
+        // agent stops spreading the 0.86 hook into its loop config.
+        if (options.legacyCapEndsRun) {
+          config.shouldStopAfterTurn?.({ message: { stopReason: "toolUse" } });
         }
         if (options.capQuietTail) {
           config.finishTurn?.({ message: { stopReason: "stop" }, toolResults: [] });
@@ -198,6 +204,39 @@ describe("runReflector failure guard", () => {
         maxTurns: 1,
       }),
     ).resolves.toEqual({ reflections: undefined });
+  });
+
+  it("throws on a trailing error even when the capped run recorded nothing", async () => {
+    const error = await runReflector({
+      ...baseArgs,
+      agentLoop: scriptedLoop([], { capEndsRun: true, agentError: "Stream connection severed" }),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    // A trailing provider error beats the zero-record cap empty-success: the
+    // review never completed cleanly, so the stage must not advance the
+    // reflector cursor over uncrystallized observations.
+    expect(error).toBeInstanceOf(WorkerStreamError);
+    expect(error).toMatchObject({
+      message: "Reflector API error: Stream connection severed",
+      discardedCount: 0,
+    });
+  });
+
+  it("throws when the legacy turn-cap hook ends a run that never closed", async () => {
+    const error = await runReflector({
+      ...baseArgs,
+      agentLoop: scriptedLoop([reflectionBatch("Partial reflection", false)], {
+        legacyCapEndsRun: true,
+      }),
+      maxTurns: 1,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(WorkerStreamError);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("turn cap"),
+      discardedCount: 1,
+    });
   });
 
   it("does not classify turn-cap exhaustion as a provider error", async () => {
