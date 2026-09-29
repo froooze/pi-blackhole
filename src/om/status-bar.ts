@@ -24,6 +24,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Runtime, ConsolidationPhase } from "./runtime.js";
 import {
   foldLedger,
+  observationPoolTokens,
   rawTokensSinceLastCompaction,
   rawTokensSinceObservationCoverage,
   type Entry,
@@ -243,7 +244,9 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     const folded = foldLedger(entries);
     gauges = {
       obsSince: rawTokensSinceObservationCoverage(entries),
-      pool: folded.activeObservations.reduce((sum, o) => sum + (o.tokenCount ?? 0), 0),
+      // Live active pool only — the P gauge deliberately omits manual-mode
+      // pending batches (the dropper trigger includes them); see issue #120.
+      pool: observationPoolTokens(entries).tokens,
       ctxTokens: rawTokensSinceLastCompaction(entries),
     };
     syncWorkers({
@@ -291,10 +294,11 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    ui = ctx.ui as StatusBarUi;
+    ui = ctx.hasUI !== false ? (ctx.ui as StatusBarUi | undefined) : undefined;
     model = ctx.model;
     lastCtx = ctx as BranchCtx;
     clearWorkers();
+    if (!ui) return;
     recompute(ctx as BranchCtx);
     // The pipeline can launch after this module's event handlers ran (handler
     // order inside one event is not a guarantee we own), and an idle session

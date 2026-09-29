@@ -101,6 +101,24 @@ describe("compact-failed hook", () => {
     expect(pi.on).toHaveBeenCalledWith("session_compact_failed", expect.any(Function));
   });
 
+  it("keeps the receiver on a class-based ExtensionAPI (oh-my-pi)", () => {
+    // A class-based host reads instance state inside `on`; a detached call would
+    // throw `undefined is not an object (evaluating 'this.extension')`. The hook
+    // must bind `pi.on` to its receiver before widening the signature.
+    class ClassBasedPi {
+      extension = { handlers: [] as Array<{ event: string; handler: unknown }> };
+      on(event: string, handler: unknown) {
+        this.extension.handlers.push({ event, handler });
+      }
+    }
+    const pi = new ClassBasedPi();
+
+    expect(() =>
+      registerCompactFailedHook(pi as any, { ensureConfig: vi.fn() } as any),
+    ).not.toThrow();
+    expect(pi.extension.handlers.map((entry) => entry.event)).toEqual(["session_compact_failed"]);
+  });
+
   it("aborts the pending controller before resetting compactInFlight", () => {
     const { handler, runtime } = captureHandler({ compactInFlight: true });
     const ctx = fakeCtx();

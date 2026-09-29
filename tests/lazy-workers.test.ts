@@ -10,7 +10,7 @@ beforeEach(() => {
   vi.resetModules();
   imports = [];
   runObserver = vi.fn(async () => ({ observations: [] }));
-  runReflector = vi.fn(async () => []);
+  runReflector = vi.fn(async () => ({ reflections: [] }));
   runDropper = vi.fn(async () => []);
   vi.doMock("../src/om/agents/observer/agent.js", () => {
     imports.push("observer");
@@ -35,6 +35,8 @@ function fixture() {
   runtime.scheduleCursorFlush = vi.fn();
   runtime.resolveModel = vi.fn(async () => ({
     ok: true as const,
+    source: "candidate" as const,
+    candidateConfig: { provider: "test", id: "model" },
     model: { provider: "test", id: "model", contextWindow: 1_000_000 },
     apiKey: "test",
   }));
@@ -125,15 +127,17 @@ describe("lazy worker imports", () => {
       ],
     });
     // Reflector must return reflections for the dropper to receive them
-    runReflector.mockResolvedValue([
-      {
-        id: "bbbbbbbbbbbb",
-        content: "test reflection",
-        timestamp: "2025-01-01T00:00:00.000Z",
-        observationIds: ["aaaaaaaaaaaa"],
-        tokenCount: 8,
-      },
-    ]);
+    runReflector.mockResolvedValue({
+      reflections: [
+        {
+          id: "bbbbbbbbbbbb",
+          content: "test reflection",
+          timestamp: "2025-01-01T00:00:00.000Z",
+          observationIds: ["aaaaaaaaaaaa"],
+          tokenCount: 8,
+        },
+      ],
+    });
     runDropper.mockResolvedValue(["aaaaaaaaaaaa"]);
     const generation = f.runtime.captureGeneration("test-session");
     await runConsolidationPipeline(f.pi, f.runtime, f.ctx, generation);

@@ -3,9 +3,11 @@
 //
 //   - tsup present  → build dist/ (real build errors still fail loudly —
 //                     that's a dev/CI bug, not a consumer environment issue)
-//   - tsup missing  → skip silently. Registry consumers never run this
-//                     script at all; git consumers without devDependencies
-//                     (pi default `npm install --omit=dev` for git deps) skip.
+//   - tsup missing  → skip the build. If dist/ is also missing, warn loudly:
+//                     pi resolves the extension from ./dist/index.js, so a git
+//                     consumer without devDependencies (pi default
+//                     `npm install --omit=dev`) would otherwise get a silent
+//                     no-load. Registry consumers never run this script at all.
 //   - simple-git-hooks present → (re)install git hooks, best-effort (dev checkouts only)
 //   - Also patches pre-push hook to require SKIP_PRE_PUSH_ALLOWED
 //
@@ -28,6 +30,16 @@ if (existsSync(tsup)) {
     console.error("[prepare] tsup build failed");
     process.exit(r.status ?? 1);
   }
+} else if (!existsSync(join(root, "dist", "index.js"))) {
+  console.warn(
+    [
+      "[prepare] tsup not found and dist/index.js is missing.",
+      "[prepare] Pi loads this extension from ./dist/index.js, so it will not load.",
+      "[prepare] This happens on git installs that skip devDependencies (pi default `npm install --omit=dev`).",
+      '[prepare] Fix: set npmCommand in ~/.pi/agent/settings.json, e.g. "npmCommand": ["npm"], then reinstall.',
+      "[prepare] Or install from npm: pi install npm:pi-blackhole",
+    ].join("\n"),
+  );
 }
 
 // 2. Git hooks, best-effort (only meaningful in a dev checkout).

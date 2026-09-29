@@ -203,9 +203,11 @@ describe("custom provider stream bridge", () => {
 
     captureRegisteredProviderStreams(registry as any, providerStreams);
 
-    expect(providerStreams.get(providerStreamKey("custom-provider", "custom-api"))).toBe(
-      customStream,
-    );
+    // Entries are stored bound to their config, so assert dispatch instead of identity.
+    const captured = providerStreams.get(providerStreamKey("custom-provider", "custom-api"));
+    expect(captured).toBeTypeOf("function");
+    (captured as Function)();
+    expect(customStream).toHaveBeenCalledOnce();
   });
 
   it("keeps separate streams for providers that share the same api", () => {
@@ -225,12 +227,10 @@ describe("custom provider stream bridge", () => {
 
     captureRegisteredProviderStreams(registry as any, providerStreams);
 
-    expect(providerStreams.get(providerStreamKey("anthropic", "anthropic-messages"))).toBe(
-      anthropicStream,
-    );
-    expect(providerStreams.get(providerStreamKey("databricks", "anthropic-messages"))).toBe(
-      databricksStream,
-    );
+    (providerStreams.get(providerStreamKey("anthropic", "anthropic-messages")) as Function)();
+    (providerStreams.get(providerStreamKey("databricks", "anthropic-messages")) as Function)();
+    expect(anthropicStream).toHaveBeenCalledOnce();
+    expect(databricksStream).toHaveBeenCalledOnce();
   });
 
   it("refreshes a provider's stream when it re-registers", () => {
@@ -245,7 +245,9 @@ describe("custom provider stream bridge", () => {
     captureRegisteredProviderStreams(make(first) as any, providerStreams);
     captureRegisteredProviderStreams(make(second) as any, providerStreams);
 
-    expect(providerStreams.get(providerStreamKey("p", "a"))).toBe(second);
+    (providerStreams.get(providerStreamKey("p", "a")) as Function)();
+    expect(second).toHaveBeenCalledOnce();
+    expect(first).not.toHaveBeenCalled();
   });
 
   it("uses the discovered stream for a custom provider/api pair", () => {
@@ -262,6 +264,33 @@ describe("custom provider stream bridge", () => {
     );
     expect(customStream).toHaveBeenCalledOnce();
     expect(fallbackStream).not.toHaveBeenCalled();
+  });
+
+  it("captures provider streams bound to their config for the global map", () => {
+    const fallbackStream = vi.fn(() => "fallback");
+    class ProviderConfigDouble {
+      api = "custom-api";
+      runtime = { streamSimple: vi.fn(() => "captured") };
+
+      streamSimple() {
+        return this.runtime.streamSimple();
+      }
+    }
+    const config = new ProviderConfigDouble();
+    const registry = {
+      getRegisteredProviderIds: () => ["custom-provider"],
+      getRegisteredProviderConfig: () => config,
+    };
+    const providerStreams = new Map<string, Function>();
+    captureRegisteredProviderStreams(registry as any, providerStreams);
+    (globalThis as any)[Symbol.for("pi-blackhole:provider-streams")] = providerStreams;
+    const bridge = createBridgeStreamFn(fallbackStream);
+
+    // The captured handler must keep its receiver: a class-based provider config
+    // reads instance state, so a bare `customFn(...)` throws and silently
+    // degrades to the compat dispatcher.
+    expect(bridge({ provider: "custom-provider", api: "custom-api" }, "ctx", {})).toBe("captured");
+    expect(config.runtime.streamSimple).toHaveBeenCalledOnce();
   });
 
   it("routes a model to its own provider's stream, not another provider with the same api", () => {
@@ -371,6 +400,29 @@ describe("custom provider stream bridge", () => {
     expect(bridge({ provider: "cursor-alias", api: "cursor-sdk" }, "ctx", {})).toBe("cursor");
     expect(cursorStream).toHaveBeenCalledOnce();
     expect(fallbackStream).not.toHaveBeenCalled();
+  });
+
+  it("calls an api-only matched provider's streamSimple with its config as receiver", () => {
+    const fallbackStream = vi.fn(() => "fallback");
+    class ProviderConfigDouble {
+      api = "cursor-sdk";
+      runtime = { streamSimple: vi.fn(() => "aliased") };
+
+      streamSimple() {
+        return this.runtime.streamSimple();
+      }
+    }
+    const config = new ProviderConfigDouble();
+    const modelRegistry = {
+      getRegisteredProviderIds: () => ["cursor"],
+      getRegisteredProviderConfig: () => config,
+    };
+    const bridge = createBridgeStreamFn(fallbackStream, modelRegistry);
+
+    // Provider id differs from the registered id (host alias) — the api match
+    // must still invoke the handler on its config, not as a bare function.
+    expect(bridge({ provider: "cursor-alias", api: "cursor-sdk" }, "ctx", {})).toBe("aliased");
+    expect(config.runtime.streamSimple).toHaveBeenCalledOnce();
   });
 
   it("falls back to compat when registry lookup throws", () => {

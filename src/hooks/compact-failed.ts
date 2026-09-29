@@ -49,7 +49,10 @@ export function registerCompactFailedHook(pi: ExtensionAPI, runtime: Runtime): v
   // `session_compact_failed` ships in pi >= 0.84.3 (our minimum supported
   // version), so register through a widened signature. On older pi the
   // event never fires and this handler stays dormant.
-  const onAny = pi.on as unknown as (
+  // `bind(pi)` preserves the receiver: hosts that implement ExtensionAPI as a
+  // class rather than a closure (e.g. oh-my-pi) read `this` inside `on`, so a
+  // detached reference throws at registration. No-op on pi, which ignores `this`.
+  const onAny = pi.on.bind(pi) as unknown as (
     event: string,
     handler: (event: any, ctx: any) => void,
   ) => void;

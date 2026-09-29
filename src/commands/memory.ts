@@ -20,6 +20,7 @@ import {
   entryIndexForId,
   foldLedger,
   fullProjection,
+  observationPoolTokens,
   observationToSummaryLine,
   rawTokensAfterIndex,
   rawTokensSinceDropCoverage,
@@ -51,6 +52,15 @@ function firstArg(args: unknown): string | undefined {
 
 function pct(current: number, total: number): number {
   return total > 0 ? Math.round((current / total) * 100) : 0;
+}
+
+function pressureHint(config: {
+  dropperPressureThreshold: number;
+  dropperPoolFullnessThreshold: number;
+}): string {
+  if (config.dropperPressureThreshold >= 1) return "pressure off";
+  const threshold = Math.max(config.dropperPressureThreshold, config.dropperPoolFullnessThreshold);
+  return `pressure at ≥${Math.round(threshold * 100)}% pool`;
 }
 
 /**
@@ -160,10 +170,18 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
       const full = fullProjection(entries);
       const drift = diffProjection(visible, full);
 
-      const observationPoolTokens = folded.activeObservations.reduce(
-        (sum, o) => sum + (o.tokenCount ?? 0),
-        0,
-      );
+      // Manual mode keeps observations in pending.json rather than the branch;
+      // include those batches so this line matches the dropper trigger's pool.
+      const pending = isManualMode(runtime.config) ? readPendingState(sessionId) : undefined;
+      const { tokens: poolTokens } = observationPoolTokens(entries, pending);
+      // Manual mode keeps records out of the branch; surface the pending share
+      // explicitly so a manual-only user can see where the pool number comes from.
+      const branchPoolTokens = pending ? observationPoolTokens(entries).tokens : poolTokens;
+      const pendingPoolTokens = poolTokens - branchPoolTokens;
+      const poolScopeSuffix =
+        pendingPoolTokens > 0
+          ? ` · branch ${branchPoolTokens.toLocaleString()} + pending ${pendingPoolTokens.toLocaleString()}`
+          : "";
       const visibleReflectionTokens = tokenSum(visible.reflections);
       const observationLine = appendSuffixes(
         `Observations: ${folded.observations.length} recorded / ${folded.droppedObservationIds.size} dropped / ${visible.observations.length} visible`,
@@ -183,8 +201,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
 
       // In manual mode, pending coversUpToId entries act as virtual coverage markers
       // that aren't reflected in the branch. Adjust accumulated counts accordingly.
-      if (isManualMode(runtime.config)) {
-        const pending = readPendingState(sessionId);
+      if (pending) {
         if (pending.observation?.coversUpToId) {
           const idx = entryIndexForId(entries, pending.observation.coversUpToId);
           if (idx >= 0) obsProgress = rawTokensAfterIndex(entries, idx);
@@ -214,18 +231,17 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         "Transcript accumulated since last run. Triggers when exceeding threshold.",
         `Observer:       ~${obsProgress.toLocaleString()} tokens (triggers at ${runtime.config.observeAfterTokens.toLocaleString()})`,
         `Reflector:      ~${reflectionProgress.toLocaleString()} tokens (triggers at ${runtime.config.reflectAfterTokens.toLocaleString()})`,
-        `Dropper:        pool ${pct(observationPoolTokens, runtime.config.observationsPoolMaxTokens)}% — prunes at ≥${Math.round(runtime.config.dropperPoolFullnessThreshold * 100)}% pool (${dropProgress.toLocaleString()}/${runtime.config.reflectAfterTokens.toLocaleString()} new tokens)`,
+        `Dropper:        pool ${pct(poolTokens, runtime.config.observationsPoolMaxTokens)}% — eligible at ≥${Math.round(runtime.config.dropperPoolFullnessThreshold * 100)}% with new data; ${pressureHint(runtime.config)} (${dropProgress.toLocaleString()}/${runtime.config.reflectAfterTokens.toLocaleString()} new tokens)`,
         `Compaction:     ~${compactionProgress.toLocaleString()} tokens` +
           (isManualMode(runtime.config)
             ? " [manual]"
             : ` (triggers at ${autoCompactThreshold(runtime.config, ctx.model).toLocaleString()}${compactThresholdSuffix(runtime.config, sessionContextWindow(ctx.model, runtime.config))})`),
-        `Obs pool:       ~${observationPoolTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(observationPoolTokens, runtime.config.observationsPoolMaxTokens)}%)`,
+        `Obs pool:       ~${poolTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(poolTokens, runtime.config.observationsPoolMaxTokens)}%)${poolScopeSuffix}`,
         `Reflect pool:   ~${visibleReflectionTokens.toLocaleString()} tokens`,
       ];
 
       // Show pending data when manual mode is active
-      if (isManualMode(runtime.config)) {
-        const pending = readPendingState(sessionId);
+      if (pending) {
         const hasObs = !!pending.observation;
         const hasRef = !!pending.reflection;
         const hasDrop = !!pending.dropped;

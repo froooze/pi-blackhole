@@ -227,6 +227,9 @@ export function buildCompactionProjection(
     reflectionsBoundary: maintenanceBoundary,
     dropsBoundary: maintenanceBoundary,
   });
+  // Boundary-scoped, not the live pool: this sum answers "what would survive
+  // this compaction" (observations inside the output boundary). It deliberately
+  // differs from observationPoolTokens(), which measures the live active pool.
   const observationTokens = normalProjection.observations.reduce(
     (total, observation) => total + observation.tokenCount,
     0,

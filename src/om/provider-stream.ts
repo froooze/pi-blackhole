@@ -50,21 +50,28 @@ export function captureRegisteredProviderStreams(
   registry: ProviderRegistry,
   providerStreams: Map<string, Function>,
 ): void {
+  // Bind each handler to the config it came from: a class-based provider reads
+  // instance state, and the bridge dispatch calls the stored entry as a bare
+  // function, where `this` would otherwise be undefined.
+  const capture = (providerId: string, config: RegisteredProviderConfig | undefined): void => {
+    if (config?.streamSimple && config.api) {
+      // Always overwrite: providers may re-register (e.g. after async model refresh).
+      providerStreams.set(
+        providerStreamKey(providerId, config.api),
+        config.streamSimple.bind(config),
+      );
+    }
+  };
+
   if (registry.getRegisteredProviderIds && registry.getRegisteredProviderConfig) {
     for (const providerId of registry.getRegisteredProviderIds()) {
-      const config = registry.getRegisteredProviderConfig(providerId);
-      if (config?.streamSimple && config.api) {
-        // Always overwrite: providers may re-register (e.g. after async model refresh).
-        providerStreams.set(providerStreamKey(providerId, config.api), config.streamSimple);
-      }
+      capture(providerId, registry.getRegisteredProviderConfig(providerId));
     }
     return;
   }
 
   registry.registeredProviders?.forEach((config, providerId) => {
-    if (config.streamSimple && config.api && typeof providerId === "string") {
-      providerStreams.set(providerStreamKey(providerId, config.api), config.streamSimple);
-    }
+    if (typeof providerId === "string") capture(providerId, config);
   });
 }
 
@@ -254,7 +261,7 @@ export function createBridgeStreamFn(
       typeof (modelRegistry as any).getRegisteredProviderConfig === "function"
     ) {
       try {
-        let apiMatch: Function | undefined;
+        let apiMatch: { config: RegisteredProviderConfig; handler: Function } | undefined;
         for (const providerId of (modelRegistry as any).getRegisteredProviderIds()) {
           const config = (modelRegistry as any).getRegisteredProviderConfig(providerId);
           if (!config || typeof config.streamSimple !== "function") continue;
@@ -262,10 +269,10 @@ export function createBridgeStreamFn(
             return config.streamSimple(model, ctx, o);
           }
           if (config.api === model.api && apiMatch === undefined) {
-            apiMatch = config.streamSimple;
+            apiMatch = { config, handler: config.streamSimple };
           }
         }
-        if (apiMatch) return apiMatch(model, ctx, o);
+        if (apiMatch) return apiMatch.handler.call(apiMatch.config, model, ctx, o);
       } catch {
         // Incomplete host/test doubles — fall through to global map
       }

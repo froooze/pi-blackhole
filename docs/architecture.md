@@ -85,9 +85,7 @@ src/
     tokens.ts                 # Token counting
     ids.ts                    # ID generation
     clipboard.ts              # Clipboard helpers
-    configure-overlay.ts      # Interactive config overlay TUI
-    status-overlay.ts         # Status display overlay TUI
-    key-matcher.ts            # Key matching for overlay
+    key-matcher.ts            # visibleWidth + key matching helpers
     debug-log.ts              # JSONL debug logging
     agents/
       observer/               # Observer agent (agent.ts, prompts.ts)
@@ -213,7 +211,7 @@ The extension's consolidation agents are loaded via `jiti` with `moduleCache: fa
 
 The bridge solves this with two mechanisms:
 
-1. **Wrap `pi.registerProvider`** — Captures `streamSimple` functions at registration time into a `Symbol.for("pi-blackhole:provider-streams")` global Map. Handles providers registered after pi-blackhole's factory runs.
+1. **Wrap `pi.registerProvider`** — Captures `streamSimple` functions at registration time into a `Symbol.for("pi-blackhole:provider-streams")` global Map, bound to the provider config they came from so class-based handlers keep their instance state. Handles providers registered after pi-blackhole's factory runs.
 2. **`agent_start` scan** — On first agent start, scans `modelRegistry.registeredProviders` for providers that registered before pi-blackhole loaded. Uses `hasScannedFallback` flag to run once.
 
 The `createBridgeStreamFn()` in [[src/om/provider-stream.ts]] lets jiti-loaded agents access these custom providers without going through pi-ai's registry.

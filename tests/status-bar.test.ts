@@ -17,6 +17,7 @@ import {
   OM_OBSERVATIONS_DROPPED,
   OM_OBSERVATIONS_RECORDED,
   OM_REFLECTIONS_RECORDED,
+  observationPoolTokens,
 } from "../src/om/ledger/index.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -200,6 +201,25 @@ describe("status bar", () => {
       // Pool = 5000/20000 = 25% → 2 filled cells, all dim.
       const pSection = h.plain()!.slice(h.plain()!.indexOf("P"), h.plain()!.indexOf("X"));
       expect(pSection).toContain("▕██░░░░░░▏");
+    });
+
+    it("P gauge fill equals the shared observationPoolTokens measurement", async () => {
+      const h = setup();
+      const entries = [
+        msg("e1", 100),
+        obsRecorded("m1", "e1", [
+          observation("aabbccddeeff", 6_000),
+          observation("112233445566", 4_000),
+          observation("778899aabbcc", 3_000),
+        ]),
+        obsDropped("m2", "e1", ["778899aabbcc"]),
+      ];
+      h.setEntries(entries);
+      await h.fire("session_start", {}, h.ctx);
+      // Helper pool = 6,000 + 4,000 = 10,000 → 10k/20k = 50% → 4 filled cells.
+      expect(observationPoolTokens(entries as never).tokens).toBe(10_000);
+      const pSection = h.plain()!.slice(h.plain()!.indexOf("P"), h.plain()!.indexOf("X"));
+      expect(pSection).toContain("▕████░░░░▏");
     });
 
     it("X gauge counts tokens since the last compaction", async () => {
@@ -464,6 +484,24 @@ describe("status bar", () => {
       await h.fire("session_start", {}, h.ctx);
       await h.fire("session_shutdown", {});
       expect(h.lastStatus()).toBeUndefined();
+    });
+
+    it("does not render or start polling when ctx.hasUI is false", async () => {
+      const h = setup();
+      h.setEntries([msg("e1", 1_000)]);
+      const timersBefore = vi.getTimerCount();
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: false });
+      expect(h.setStatus).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(timersBefore);
+    });
+
+    it("does not render or start polling when ctx.ui is undefined", async () => {
+      const h = setup();
+      h.setEntries([msg("e1", 1_000)]);
+      const timersBefore = vi.getTimerCount();
+      await h.fire("session_start", {}, { ...h.ctx, ui: undefined });
+      expect(h.setStatus).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(timersBefore);
     });
   });
 });

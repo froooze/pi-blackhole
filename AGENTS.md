@@ -9,7 +9,7 @@ pnpm test          # vitest run (all tests, ~89 files, no network)
 pnpm typecheck     # tsc --noEmit (src/**/*.ts + index.ts only)
 pnpm lint          # oxlint .
 pnpm format:check  # oxfmt --check .
-pnpm build         # tsup bundle → dist/ (gitignored; pi-entry.js loads dist/ fast or falls back to index.ts)
+pnpm build         # tsup bundle → dist/ (gitignored; pi loads dist/index.js)
 pnpm check         # typecheck + lint
 ```
 
@@ -17,7 +17,7 @@ pnpm check         # typecheck + lint
 - pre-commit: lint-staged (now in `package.json:lint-staged`) + typecheck. pre-push: typecheck + test.
 - pnpm only (`packageManager: pnpm@11.2.2`). TypeScript pinned to 6.0.3 for @typescript-eslint v8 compat — never bump TS alone.
 - `oxfmt` config and `lint-staged` live in `package.json`; `.oxfmtignore` stays at root.
-- Prepare script (`scripts/prepare.mjs`) builds dist via tsup on install; must never break consumer installs.
+- Prepare script (`scripts/prepare.mjs`) builds dist via tsup on install; must never break consumer installs. It warns (never fails) when tsup is absent and `dist/index.js` is missing, which is the git install without `npmCommand` case.
 
 ## Testing quirks
 
@@ -28,7 +28,7 @@ pnpm check         # typecheck + lint
 
 ## Architecture
 
-- (registered via `pi.extensions` in package.json): fast `dist/index.js` bundle when present, fallback to `index.ts` when `dist/` is missing (git installs with `--omit=dev` → tsup missing → prepare skips). `index.ts` is the real factory — installs the host inline-compaction adapter, captures provider streams, registers consolidation + compaction triggers, `session_before_compact` + `session_compact_failed` + `context` hooks, commands, and the unified `recall` tool.
+- `index.ts` is the real factory; `pi.extensions` points at the built `dist/index.js` (gitignored). Git installs that skip devDependencies (`npm install --omit=dev` with no `npmCommand` set) cannot build dist, so `scripts/prepare.mjs` warns and the extension will not load until `npmCommand` is set. The factory installs the host inline-compaction adapter, captures provider streams, registers consolidation + compaction triggers, `session_before_compact` + `session_compact_failed` + `context` hooks, commands, and the unified `recall` tool.
 - `src/core/` — unified config (`unified-config.ts` = defaults + resolution; env overrides declared in `config-env.ts` as `PI_BLACKHOLE_*`). configManager is the true source and entry point - users edit in UI.
 - `src/extract/` — vcc compaction section extraction (goals, files, commits, preferences, brief).
 - `src/om/` — observational memory: `agents/` (observer → reflector → dropper agent loops), `ledger/`, `runtime.ts`, `consolidation.ts`, `compaction-trigger.ts`, `cooldown.ts` (persisted fallback cooldowns), `pending.ts` (manual-mode disk buffers), `inline-compaction.ts`.
