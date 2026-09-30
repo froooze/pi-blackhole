@@ -253,7 +253,11 @@ describe("status bar", () => {
       const h = setup({ memory: false });
       h.setEntries([msg("e1", 20_000)]);
       await h.fire("session_start", {}, h.ctx);
-      const s = h.lastStatus()!;
+      const s = h.lastStatus();
+      // Pin the positive shape first: a gauge still renders (X, dim at
+      // 20k/100k), so the negatives below can only be about O/P being hidden.
+      expect(s).toContain("dim:▕");
+      expect(s).not.toContain("muted:O");
       expect(s).not.toContain("warning:█");
       expect(s).not.toContain("error:█");
     });
@@ -289,6 +293,21 @@ describe("status bar", () => {
       await h.fire("agent_end", {}, h.ctx);
       expect(h.lastStatus()).toContain("muted:O");
       expect(h.lastStatus()).toContain("muted:P");
+    });
+
+    it("re-measures the gauges on the idle poll when memory flips alone", async () => {
+      const h = setup({ memory: false });
+      h.setEntries([msg("e1", 20_000)]);
+      await h.fire("session_start", {}, h.ctx);
+      expect(h.lastStatus()).not.toContain("muted:O");
+      h.runtime.config.memory = true;
+      // No agent_end and no new branch entries — only the 1s idle poll runs.
+      await vi.advanceTimersByTimeAsync(1_000);
+      const s = h.lastStatus();
+      expect(s).toContain("muted:O");
+      // O at 20k/15k renders error-colored only if it was re-measured; the
+      // 0 written while memory was off would repaint dim instead.
+      expect(s).toContain("error:█");
     });
   });
 

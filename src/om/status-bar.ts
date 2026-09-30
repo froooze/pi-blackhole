@@ -87,6 +87,9 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   let lastTailId: string | undefined;
   let lastInFlight = false;
   let lastPhase: ConsolidationPhase | undefined;
+  // O/P are only measured while memory is on, so a flip of that flag has to
+  // count as a change too (set in recompute; session_start always runs first).
+  let lastMemoryOn = true;
 
   function theme(): ThemeShim {
     return ui?.theme ?? EMPTY_THEME;
@@ -117,9 +120,12 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     lastRendered = undefined;
   }
 
+  /**
+   * Compose the footer and write it to ctx.ui.setStatus. Every render-time
+   * gate lives here so a config change (om-on/om-off, /blackhole settings)
+   * is picked up on the next tick without re-registering.
+   */
   function render(): void {
-    // Every render-time gate lives here so a config change (om-on/om-off,
-    // /blackhole settings) is picked up on the next tick without re-registering.
     if (!ui) return; // no UI or ctx.hasUI === false — nothing to draw into
     if (runtime.config.statusBar === false) {
       clearStatus();
@@ -254,12 +260,17 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     lastTailId = entries[entries.length - 1]?.id;
     lastInFlight = runtime.consolidationInFlight;
     lastPhase = runtime.consolidationPhase;
+    const memoryOn = runtime.config.memory !== false;
+    lastMemoryOn = memoryOn;
+    // foldLedger also feeds syncWorkers (worker deltas), so it always runs;
+    // the two O/P-only scans are skipped while memory is off, since nothing
+    // can read them until the next render where the gauges reappear.
     const folded = foldLedger(entries);
     gauges = {
-      obsSince: rawTokensSinceObservationCoverage(entries),
+      obsSince: memoryOn ? rawTokensSinceObservationCoverage(entries) : 0,
       // Live active pool only — the P gauge deliberately omits manual-mode
       // pending batches (the dropper trigger includes them); see issue #120.
-      pool: observationPoolTokens(entries).tokens,
+      pool: memoryOn ? observationPoolTokens(entries).tokens : 0,
       ctxTokens: rawTokensSinceLastCompaction(entries),
     };
     syncWorkers({
@@ -278,7 +289,10 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     if (
       lastCtx &&
       runtime.consolidationInFlight === lastInFlight &&
-      runtime.consolidationPhase === lastPhase
+      runtime.consolidationPhase === lastPhase &&
+      // A memory flip changes which gauges are measured, so it forces a
+      // recompute instead of a bare render (stale zeros otherwise).
+      (runtime.config.memory !== false) === lastMemoryOn
     ) {
       try {
         const entries = branchOf(lastCtx);

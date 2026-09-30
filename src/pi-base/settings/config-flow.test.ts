@@ -464,6 +464,26 @@ describe("ConfigFlow smoke tests", () => {
 
       await promise;
     });
+
+    it("a row overridden by a higher layer reads overridden by, like display-all", async () => {
+      writeGlobal({ threshold: 9 });
+      writeProject({ enabled: false });
+      const ctx = fakeCtx();
+      const mgr = createManager();
+
+      const promise = mgr.openSettings(ctx, tempDir, vi.fn(), tempDir);
+
+      await selectFirst(ctx); // Global edit mode
+      const body = getEditBody(ctx);
+      const out = body.render(80).join("\n");
+
+      // Global's own (default) `enabled` loses to Project Local — the row
+      // must make the same claim display-all makes for the same key.
+      expect(out).toContain("overridden by Project Local");
+      expect(out).not.toContain("(from Project Local)");
+
+      await promise;
+    });
   });
 
   // ── 3. Edit mode save ───────────────────────────────────────────────
@@ -1661,6 +1681,42 @@ describe("ConfigFlow smoke tests", () => {
       const globalOut = daBody.render(80).join("\n");
       expect(globalOut).toContain("▸ effective"); // threshold on Global tab
       expect(globalOut).toContain("overridden by Project Local"); // enabled losing to project
+
+      await promise;
+    });
+
+    it("pins the shared precedence order when both layers set the same key", async () => {
+      writeGlobal({ enabled: false });
+      writeProject({ enabled: true });
+      const ctx = fakeCtx();
+      const mgr = createManager();
+
+      const promise = mgr.openSettings(ctx, tempDir, vi.fn(), tempDir);
+
+      const customMock = ctx.ui.custom as ReturnType<typeof vi.fn>;
+      const selFactory = customMock.mock.calls[0]?.[0] as (
+        tui: TUI,
+        theme: Theme,
+        kb: KeybindingsManager,
+        done: (r: unknown) => void,
+      ) => Component;
+      const sel = selFactory(fakeTui(), fakeTheme(), null! as KeybindingsManager, (r) => {
+        ctx.ui.done(r);
+      });
+      navigateToDisplayAll(sel, false);
+      sel.handleInput?.("\r");
+      await ctx.ui.done(vi.fn());
+
+      const daBody = getDisplayAllBody(ctx);
+
+      // Both layers set `enabled`, so the winner order must agree between
+      // ConfigManager.inspect() and the note's rank: project beats global
+      // (Global's row is overridden, never effective, never sourced from the
+      // overriding layer) and global beats defaults (threshold row).
+      const globalOut = daBody.render(80).join("\n");
+      expect(globalOut).toContain("overridden by Project Local");
+      expect(globalOut).not.toContain("▸ effective");
+      expect(globalOut).not.toContain("(from Project Local)");
 
       await promise;
     });
