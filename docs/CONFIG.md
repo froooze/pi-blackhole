@@ -579,7 +579,7 @@ Each model config supports the following fields:
 
 ### `statusBar`
 
-Show the footer status bar: three token gauges — O (transcript since last observer run), P (observation pool fill), X (context since last compaction) — plus worker spinners and `✓ +N` completion events.
+Show the footer status bar: three token gauges — O (transcript since last observer run), P (observation pool fill), X (context since last compaction) — plus worker spinners and `✓ +N` completion events. O and P render only while [`memory`](#memory) is `true`: with observational memory disabled the pipeline hard-returns before any observer runs, so a filling gauge would imply a note-taking pass that is never due. The gauges return on the next render after `/blackhole om-on` re-enables memory.
 
 | Type | Default |
 |------|---------|

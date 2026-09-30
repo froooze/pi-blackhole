@@ -6,7 +6,10 @@
  * observeAfterTokens), P = observation pool fill (fills at
  * observationsPoolMaxTokens), X = context tokens since the last compaction
  * (fills at the auto-compaction threshold). A gauge turns warning-colored at
- * or above 100%.
+ * or above 100%. O and P are omitted while `memory === false`: the
+ * consolidation pipeline hard-returns before any observer runs, so a filling
+ * gauge would imply a pass that is never due. They return on the next render
+ * when memory is re-enabled (/blackhole om-on).
  *
  * Worker events sit beside the gauges: a spinner while a stage runs, then
  * `✓ +N` for 5 seconds. A stage that skipped itself (nothing due) never
@@ -115,7 +118,9 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   }
 
   function render(): void {
-    if (!ui) return;
+    // Every render-time gate lives here so a config change (om-on/om-off,
+    // /blackhole settings) is picked up on the next tick without re-registering.
+    if (!ui) return; // no UI or ctx.hasUI === false — nothing to draw into
     if (runtime.config.statusBar === false) {
       clearStatus();
       return;
@@ -124,10 +129,18 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     const t = theme();
     const cfg = runtime.config;
     const threshold = autoCompactThreshold(cfg, model);
-    const o = `${t.fg("muted", "O")}${gaugeBar(t, gauges.obsSince, cfg.observeAfterTokens)}`;
-    const p = `${t.fg("muted", "P")}${gaugeBar(t, gauges.pool, cfg.observationsPoolMaxTokens)}`;
-    const x = `${t.fg("muted", "X")}${gaugeBar(t, gauges.ctxTokens, threshold)}`;
-    let s = `${t.fg("success", "bh")} ${o}  ${p}  ${x}`;
+    const segments: string[] = [];
+    // O and P describe observational-memory work the consolidation pipeline
+    // never launches while memory === false (it hard-returns first), so a
+    // filling gauge would promise a note-taking pass that cannot run.
+    if (cfg.memory !== false) {
+      segments.push(`${t.fg("muted", "O")}${gaugeBar(t, gauges.obsSince, cfg.observeAfterTokens)}`);
+      segments.push(
+        `${t.fg("muted", "P")}${gaugeBar(t, gauges.pool, cfg.observationsPoolMaxTokens)}`,
+      );
+    }
+    segments.push(`${t.fg("muted", "X")}${gaugeBar(t, gauges.ctxTokens, threshold)}`);
+    let s = `${t.fg("success", "bh")} ${segments.join("  ")}`;
     const parts: string[] = [];
     for (const w of workers) {
       if (w.state.kind === "running") {

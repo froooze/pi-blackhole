@@ -945,8 +945,8 @@ describe("ConfigFlow smoke tests", () => {
       // Global tab (initial/active tab) shows its own values
       let out = daBody.render(80).join("\n");
       expect(out).toContain("10"); // threshold from global file
-      // Project value shows as inherited note on Global tab
-      expect(out).toContain("(from Project Local)");
+      // The project-set key is marked overridden here, not sourced from Project Local
+      expect(out).toContain("overridden by Project Local");
 
       await promise;
     });
@@ -1565,7 +1565,75 @@ describe("ConfigFlow smoke tests", () => {
   // ── 13. Display-all value notes ─────────────────────────────────────
 
   describe("display-all value notes", () => {
-    it("shows ▸ effective on winners and (from …) on inherited", async () => {
+    it("marks a lower-precedence tab's row as overridden, never as (from …)", async () => {
+      writeGlobal({ threshold: 10 });
+      writeProject({ enabled: false });
+      const ctx = fakeCtx();
+      const mgr = createManager();
+
+      const promise = mgr.openSettings(ctx, tempDir, vi.fn(), tempDir);
+
+      const customMock = ctx.ui.custom as ReturnType<typeof vi.fn>;
+      const selFactory = customMock.mock.calls[0]?.[0] as (
+        tui: TUI,
+        theme: Theme,
+        kb: KeybindingsManager,
+        done: (r: unknown) => void,
+      ) => Component;
+      const sel = selFactory(fakeTui(), fakeTheme(), null! as KeybindingsManager, (r) => {
+        ctx.ui.done(r);
+      });
+      navigateToDisplayAll(sel, false);
+      sel.handleInput?.("\r");
+      await ctx.ui.done(vi.fn());
+
+      const daBody = getDisplayAllBody(ctx);
+
+      // Global tab: `enabled` shows Global's own value while Project Local
+      // wins the key with a different value — the row must not claim the
+      // displayed value came from Project Local.
+      const globalOut = daBody.render(80).join("\n");
+      expect(globalOut).toContain("overridden by Project Local");
+      expect(globalOut).not.toContain("(from Project Local)");
+
+      await promise;
+    });
+
+    it("keeps (from …) when the row's value is inherited from a lower layer", async () => {
+      writeGlobal({ threshold: 10 });
+      writeProject({ enabled: false });
+      const ctx = fakeCtx();
+      const mgr = createManager();
+
+      const promise = mgr.openSettings(ctx, tempDir, vi.fn(), tempDir);
+
+      const customMock = ctx.ui.custom as ReturnType<typeof vi.fn>;
+      const selFactory = customMock.mock.calls[0]?.[0] as (
+        tui: TUI,
+        theme: Theme,
+        kb: KeybindingsManager,
+        done: (r: unknown) => void,
+      ) => Component;
+      const sel = selFactory(fakeTui(), fakeTheme(), null! as KeybindingsManager, (r) => {
+        ctx.ui.done(r);
+      });
+      navigateToDisplayAll(sel, false);
+      sel.handleInput?.("\r");
+      await ctx.ui.done(vi.fn());
+
+      const daBody = getDisplayAllBody(ctx);
+      daBody.handleInput?.("\t"); // Global → Project Local
+
+      // Project Local sets `enabled` (▸ effective); `threshold` comes from
+      // the lower Global layer, which does not override anything here.
+      const projectOut = daBody.render(80).join("\n");
+      expect(projectOut).toContain("▸ effective");
+      expect(projectOut).toContain("(from Global)");
+
+      await promise;
+    });
+
+    it("shows ▸ effective on winners and overridden on a losing tab", async () => {
       writeGlobal({ threshold: 10 });
       writeProject({ enabled: false });
       const ctx = fakeCtx();
@@ -1592,7 +1660,7 @@ describe("ConfigFlow smoke tests", () => {
       // Global tab: threshold winner is global, enabled winner is project
       const globalOut = daBody.render(80).join("\n");
       expect(globalOut).toContain("▸ effective"); // threshold on Global tab
-      expect(globalOut).toContain("(from Project Local)"); // enabled inherited
+      expect(globalOut).toContain("overridden by Project Local"); // enabled losing to project
 
       await promise;
     });

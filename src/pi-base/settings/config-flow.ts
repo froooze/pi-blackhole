@@ -130,6 +130,15 @@ function winnerLabel(winner: string): string {
   return SCOPE_LABELS[winner] ?? winner;
 }
 
+// Highest precedence first — mirrors ConfigManager.inspect()'s winner order.
+const LAYER_PRECEDENCE = ["session", "env", "project", "global", "defaults"] as const;
+
+/** 0 = highest precedence; unknown ids rank last. */
+function precedenceRank(layer: string): number {
+  const i = LAYER_PRECEDENCE.indexOf(layer as (typeof LAYER_PRECEDENCE)[number]);
+  return i === -1 ? LAYER_PRECEDENCE.length : i;
+}
+
 // ── Entry point ────────────────────────────────────────────────────────
 
 export async function openConfigFlow(
@@ -605,8 +614,16 @@ function displayValueNote(
 
   if (winner === tabId) return "▸ effective";
 
-  if (winner) return `(from ${winnerLabel(winner)})`;
-  return undefined;
+  if (!winner) return undefined;
+  // The row shows this tab's own layer's value. Only a LOWER-precedence
+  // layer can be its source ("(from X)"): when a higher layer wins the key
+  // it overrides what this tab shows, and labelling that layer as the source
+  // would read as "the displayed value came from X" — the opposite of the
+  // precedence that actually applies.
+  if (precedenceRank(winner) < precedenceRank(tabId)) {
+    return `overridden by ${winnerLabel(winner)}`;
+  }
+  return `(from ${winnerLabel(winner)})`;
 }
 
 // ── Overlay defaults ───────────────────────────────────────────────────
