@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { buildSections } from "../src/core/build-sections.js";
 import type { NormalizedBlock } from "../src/types.js";
@@ -142,6 +144,40 @@ describe("extractOutstandingContext — tool errors unchanged", () => {
   });
 });
 
+describe("extractOutstandingContext — long tool output", () => {
+  it.each([
+    { isError: false, count: "0\n" },
+    { isError: true, count: "1\n" },
+  ])("finishes scanning a long encoded tool result (isError=$isError)", ({ isError, count }) => {
+    // A synchronous regex hang also blocks an in-process test timeout.
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import { createRequire } from "node:module";
+          const require = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+          const { createJiti } = require("jiti");
+          const jiti = createJiti(import.meta.url, { fsCache: false });
+          const { buildSections } = await jiti.import("./src/core/build-sections.ts");
+          const text = JSON.stringify({ dbxs: [{ content: "A".repeat(30000) }] });
+          const sections = buildSections({
+            blocks: [{ kind: "tool_result", name: "read", text, isError: ${isError} }],
+          });
+          console.log(sections.outstandingContext.length);
+        `,
+      ],
+      { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 5000 },
+    );
+    expect({ error: child.error?.message, status: child.status, stdout: child.stdout }).toEqual({
+      error: undefined,
+      status: 0,
+      stdout: count,
+    });
+  });
+});
+
 describe("extractOutstandingContext — retry-success extinguishes errors", () => {
   const call = (name: string, args: Record<string, unknown> = {}): NormalizedBlock => ({
     kind: "tool_call",
@@ -191,6 +227,26 @@ describe("extractOutstandingContext — retry-success extinguishes errors", () =
       ok("edit", "Successfully replaced 1 block in CHANGELOG.md."),
     ];
     expect(buildSections({ blocks }).outstandingContext).toEqual([]);
+  });
+
+  it.each([
+    ["src/a.test.ts", "Updated src/a.test.ts.", 0],
+    ["/repo/src/a.ts", "Updated /repo/src/a.ts.", 0],
+    ["$WORK/src/a.ts", "Updated $work/src/a.ts.", 0],
+    ["../src/a.ts", "Updated ../src/a.ts.", 0],
+    ["src/a.tsx", "Updated src/a.tsx-long", 0],
+    ["src/a.abcde", "Updated src/a.abcde", 0],
+    ["src/a.ts", "Updated src/a.ts/contents", 0],
+    ["src/a.ts", "Updated src/a.ts/other.md", 1],
+    ["src/a.ts", "Updated /.ts", 1],
+    ["src/a.ts", "Updated $.ts", 1],
+    ["src/a.abcde", "Updated src/a.abcdef", 1],
+  ])("matches error path %s against %s", (errorPath, successText, count) => {
+    const blocks: NormalizedBlock[] = [
+      err("edit", `Could not update ${errorPath}`),
+      ok("edit", successText),
+    ];
+    expect(buildSections({ blocks }).outstandingContext.length).toBe(count);
   });
 
   it("keeps an edit error when only a different file is later edited", () => {

@@ -54,7 +54,10 @@ const OUTSTANDING_CLIP = 200;
 /** Path-like tokens (`src/a.ts`, `/repo/b.md`) used to match an error to its retry. */
 const pathTokens = (text: string): Set<string> => {
   const out = new Set<string>();
-  for (const m of text.matchAll(/[A-Za-z0-9_.$/-]*[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}\b/g)) {
+  // Scan each token once without overlapping repetitions that backtrack on encoded blobs.
+  for (const m of text.matchAll(
+    /(?<![A-Za-z0-9_.$/-])[A-Za-z0-9_.$/-]*(?<=[A-Za-z0-9_-])\.[A-Za-z0-9]{1,5}\b/g,
+  )) {
     out.add(m[0].toLowerCase());
   }
   return out;
