@@ -16,10 +16,14 @@ import { type ResolveResult, type Runtime, type RuntimeGeneration } from "./runt
 import { withProviderAttributionHeaders } from "./provider-stream.js";
 import { runWorkerAttempt, WorkerAttemptTimeoutError } from "./worker-attempt.js";
 import {
+  getDiscardedCount,
   isCooldownWorthyError,
   isDeterministicError,
   isRetryableError,
   isStaleExtensionContextError,
+  WorkerStreamError,
+  workerStreamErrorMessage,
+  type ConsolidationWorker,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { estimateEntryTokens, estimateStringTokens } from "./tokens.js";
@@ -54,6 +58,7 @@ import {
   isSourceEntry,
   latestCoverageIndex,
   latestCoverageMarkerId,
+  livePoolObservations,
   observationsCreatedAfterIndex,
   observationPoolTokens,
   observationToSummaryLine,
@@ -176,6 +181,55 @@ function pendingObservationsCreatedAfter(
   return newObs;
 }
 
+/**
+ * Pressure gate for the dropper: the pool is full enough that it should be
+ * pruned even though no new observation or reflection data has arrived.
+ *
+ * The basis is `observationsPoolMaxTokens` — the same maximum the footer
+ * P gauge and `/blackhole-memory` divide by — not `reflectorInputMaxTokens`,
+ * which only sizes reflector/dropper prompts. Both configured fractions have to
+ * clear, so the effective trigger is
+ * `max(dropperPressureThreshold, dropperPoolFullnessThreshold) × pool max`.
+ * A threshold of `1.0` (the documented "off" value), or a non-positive pool
+ * max, disables pressure entirely; the ordinary new-data trigger is
+ * unaffected.
+ */
+function dropperPressureReached(config: Runtime["config"], poolTokens: number): boolean {
+  const poolMax = config.observationsPoolMaxTokens;
+  if (poolMax <= 0 || config.dropperPressureThreshold >= 1) return false;
+  return (
+    poolTokens / poolMax >= (config.dropperPoolFullnessThreshold ?? 0.1) &&
+    poolTokens >= config.dropperPressureThreshold * poolMax
+  );
+}
+
+/**
+ * Identity of the live pool: its observation ids, sorted so the key does not
+ * depend on branch order or on where an observation came from. Ids are assigned
+ * once at write time and never rewritten, so the id set changing is the only
+ * way the pool's contents can change — which is exactly what the pressure
+ * retry guard needs to notice.
+ */
+function activePoolSignature(entries: Entry[], pending?: PendingOMState): string {
+  const observationIds = livePoolObservations(entries, pending)
+    .map((observation) => observation.id)
+    .sort();
+  return JSON.stringify(observationIds);
+}
+
+/**
+ * True when this exact pool has already been pressure-pruned and came back
+ * empty: `runDropperStage` binds the signature to the `"empty"` dropper cursor
+ * precisely so repeated due-checks cannot re-issue the same model call against
+ * a pool the dropper just declined to touch. Any pool change — a new
+ * observation, or a drop from a cadence run — yields a different signature and
+ * re-arms pressure.
+ */
+function matchesEmptyPressurePool(runtime: Runtime, poolSignature: string): boolean {
+  const cursor = runtime.cursors?.dropper;
+  return cursor?.state === "empty" && cursor.activePoolSignature === poolSignature;
+}
+
 /** Cursor-aware stage-due check.  Uses cursors when available; falls back to
  *  legacy coverage markers when cursors are absent (cold start, fork recovery).
  *
@@ -258,10 +312,14 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
           // Must have at least dropperPoolFullnessThreshold fullness to consider dropper
           if (fullnessVsPool < (config.dropperPoolFullnessThreshold ?? 0.1)) return false;
 
-          // Pressure check: pool ≥ threshold × reflectorInputMaxTokens
-          const pressure =
-            poolTokens >= config.dropperPressureThreshold * config.reflectorInputMaxTokens;
-          if (pressure) return true;
+          // Pressure check: pool ≥ max(pressure, fullness) fraction of
+          // observationsPoolMaxTokens — and not for a pool the dropper has
+          // already evaluated and left untouched.
+          if (
+            dropperPressureReached(config, poolTokens) &&
+            !matchesEmptyPressurePool(runtime, activePoolSignature(entries, pending))
+          )
+            return true;
 
           // New data check: new obs or ref batches after dropper cursor
           const cursor = cursors.dropper;
@@ -606,6 +664,98 @@ export async function runConsolidationPipeline(
   });
 }
 
+// ── Kept-close error handling (observer + reflector) ─────────────────────────
+
+/**
+ * Classify and record a provider failure from a turn after a valid
+ * complete=true close that the worker kept.
+ *
+ * The close is kept, but the failure must not be silent: a deterministic
+ * error (bad key, removed model) gets the same cooldown the stage catch
+ * applies, so the next cycle falls back instead of reporting success forever;
+ * a transient one only warns, since the model just produced a usable close.
+ * The error is classified with the same framing the throw path builds
+ * (`workerStreamErrorMessage`), so a bare provider code such as `401` is
+ * deterministic on both paths and the two cannot drift apart.
+ *
+ * The toast names only the destination that was written, never the provider
+ * body (issue #80): a cooldownHours-0 candidate is only skipped in-memory for
+ * the stage, and a session model without provider/id never reaches the
+ * cooldown file (`recordDeterministicError` keys it on both), so the
+ * not-cooled branch claims no skip and no cooldown.
+ */
+function handleWorkerErrorAfterClose(args: {
+  runtime: Runtime;
+  ctx: ConsolidationCtx;
+  stage: "observer" | "reflector";
+  worker: ConsolidationWorker;
+  keptNoun: string;
+  errorText: string;
+  resolved: ResolvedModel;
+  stageModelForThinking: ConfiguredModel | undefined;
+  coverageId: string | undefined;
+}): void {
+  const {
+    runtime,
+    ctx,
+    stage,
+    worker,
+    keptNoun,
+    errorText,
+    resolved,
+    stageModelForThinking,
+    coverageId,
+  } = args;
+  const afterClose = new Error(workerStreamErrorMessage(worker, errorText));
+  const deterministic = isDeterministicError(afterClose);
+  // The toast must describe what was actually written: a cooldownHours-0
+  // candidate cools in-memory only, and a session model whose resolved model
+  // has no provider/id never reaches the cooldown file at all —
+  // recordDeterministicError keys it on both.
+  const sessionIdentity: { provider?: unknown; id?: unknown } | null | undefined = resolved.model;
+  const cooled =
+    deterministic &&
+    (stageModelForThinking
+      ? stageModelForThinking.cooldownHours !== 0
+      : typeof sessionIdentity?.provider === "string" && typeof sessionIdentity?.id === "string");
+  if (stage === "observer") {
+    debugLog("observer.error_after_close", {
+      error: errorText,
+      deterministic,
+      coversUpToId: coverageId,
+    });
+  } else {
+    debugLog("reflector.error_after_close", {
+      error: errorText,
+      deterministic,
+      observationCoverageId: coverageId,
+    });
+  }
+  if (deterministic) {
+    runtime.recordRetryableError(stageModelForThinking, afterClose, stage);
+    if (!stageModelForThinking) {
+      runtime.recordDeterministicError(resolved.model, afterClose, stage);
+    }
+  }
+  if (ctx.hasUI) {
+    // Issue #80: the error text can be a provider body; it goes to the
+    // cooldown/debug log only, never into the toast. The pointer itself
+    // must be true too, so it names only a destination that was written.
+    ctx.ui?.notify(
+      `Observational memory: ${stage} kept its ${keptNoun}, but a later turn failed (${
+        deterministic
+          ? cooled
+            ? "deterministic error, model cooled down; details in cooldown log"
+            : "deterministic error; no cooldown recorded"
+          : runtime.config.debugLog === true
+            ? "transient error; details in debug log"
+            : "transient error; enable debugLog for details"
+      })`,
+      "warning",
+    );
+  }
+}
+
 // ── Observer stage (with fallback) ──────────────────────────────────────────
 
 export async function runObserverStage(
@@ -750,7 +900,7 @@ export async function runObserverStage(
         if (idx >= 0) effectiveTokens = rawTokensAfterIndex(entries, idx);
       }
     }
-    runtime.tryEmitInfo(
+    runtime.tryEmitWorkerInfo(
       ctx.hasUI,
       ctx.ui,
       `Observational memory: observer running on ~${chunkTokens.toLocaleString()}-token chunk (of ${effectiveTokens.toLocaleString()} accumulated)`,
@@ -832,9 +982,27 @@ export async function runObserverStage(
             signal,
             modelRegistry: ctx.modelRegistry,
             sessionId,
+            cacheRetention: runtime.config.cacheRetention,
           }),
       );
       if (!runtime.isGenerationActive(generation)) return "abort";
+
+      // The run closed the chunk and then a later turn failed (a host that
+      // ignores `terminate`). Shared with the reflector stage: same framing,
+      // same cooldown, same toast shape.
+      if (result.errorAfterClose) {
+        handleWorkerErrorAfterClose({
+          runtime,
+          ctx,
+          stage: "observer",
+          worker: "Observer",
+          keptNoun: "completed chunk",
+          errorText: result.errorAfterClose,
+          resolved,
+          stageModelForThinking,
+          coverageId: coversUpToId,
+        });
+      }
 
       if (result.observations && result.observations.length > 0) {
         const data = buildObservationsRecordedData(result.observations, coversUpToId);
@@ -862,7 +1030,7 @@ export async function runObserverStage(
           });
         }
         runtime.advanceCursor("observer", coversUpToId, "recorded");
-        runtime.tryEmitInfo(
+        runtime.tryEmitWorkerInfo(
           ctx.hasUI,
           ctx.ui,
           `Observational memory: ${result.observations.length} observation${result.observations.length === 1 ? "" : "s"} recorded`,
@@ -894,7 +1062,7 @@ export async function runObserverStage(
         if (ctx.hasUI)
           ctx.ui?.notify(`Observational memory: no observations — ${reasonLabel}`, "warning");
       } else {
-        runtime.tryEmitInfo(
+        runtime.tryEmitWorkerInfo(
           ctx.hasUI,
           ctx.ui,
           `Observational memory: no observations — ${reasonLabel}`,
@@ -920,11 +1088,22 @@ export async function runObserverStage(
         retryable: isRetryableError(error),
         deterministic: isDeterministicError(error),
         cooldownWorthy: isCooldownWorthyError(error),
+        // Records written before a stream error and discarded with the run.
+        discardedCount: getDiscardedCount(error),
       });
       // A timed-out session model has no candidate config to cool down, so
       // the loop would re-resolve the same stalled model and burn the full
       // deadline on every remaining attempt. Treat the stage as exhausted.
-      if (!candidateConfig && error instanceof WorkerAttemptTimeoutError) break;
+      // A session model cut off by the agent turn cap fails the same way for
+      // the same reason: `agentMaxTurns` is global config, so a retry spends
+      // another whole budget on an identical outcome. Candidates differ — they
+      // cool down and the fallback chain takes over.
+      if (
+        !candidateConfig &&
+        (error instanceof WorkerAttemptTimeoutError ||
+          (error instanceof WorkerStreamError && error.turnCapExhausted))
+      )
+        break;
       // Continue loop — resolveModel will skip the cooled-down model
       continue;
     }
@@ -1043,7 +1222,7 @@ async function runReflectorStage(
       newObsCount: newObservations.length,
       newRefCount: newReflections.length,
     });
-    runtime.tryEmitInfo(
+    runtime.tryEmitWorkerInfo(
       ctx.hasUI,
       ctx.ui,
       `Observational memory: reflector running (~${effectiveReflectionTokens.toLocaleString()} tokens accumulated, ~${reflectorInputTokens.toLocaleString()}-token input)`,
@@ -1109,7 +1288,7 @@ async function runReflectorStage(
       );
 
       const { runReflector } = await import("./agents/reflector/agent.js");
-      const reflections = await runWorkerAttempt(
+      const result = await runWorkerAttempt(
         "reflector",
         runtime.config.workerAttemptTimeoutMs,
         generation.signal,
@@ -1133,11 +1312,30 @@ async function runReflectorStage(
             signal,
             modelRegistry: ctx.modelRegistry,
             sessionId,
+            cacheRetention: runtime.config.cacheRetention,
           }),
       );
       if (!runtime.isGenerationActive(generation))
         return { outcome: "abort", sameRunReflections: [] };
 
+      // A kept close carries the trailing failure with it (mirroring the
+      // observer): transient warns only, deterministic cools the model so the
+      // next cycle falls back instead of burning one more full attempt.
+      if (result.errorAfterClose) {
+        handleWorkerErrorAfterClose({
+          runtime,
+          ctx,
+          stage: "reflector",
+          worker: "Reflector",
+          keptNoun: "completed review",
+          errorText: result.errorAfterClose,
+          resolved,
+          stageModelForThinking,
+          coverageId: observationCoverageId,
+        });
+      }
+
+      const reflections = result.reflections;
       if (!reflections || reflections.length === 0) {
         runtime.advanceCursor(
           "reflector",
@@ -1187,10 +1385,21 @@ async function runReflectorStage(
         retryable: isRetryableError(error),
         deterministic: isDeterministicError(error),
         cooldownWorthy: isCooldownWorthyError(error),
+        // Reflections recorded before the run failed and discarded with it.
+        discardedCount: getDiscardedCount(error),
       });
       // A timed-out session model has no candidate config to cool down, so
-      // retrying would stall on the same model for the full deadline again.
-      if (!candidateConfig && error instanceof WorkerAttemptTimeoutError) break;
+      // retrying would stall on the same model for the full deadline again. A
+      // session model cut off by the agent turn cap fails the same way for the
+      // same reason: `agentMaxTurns` is global config, so a retry spends another
+      // whole budget on an identical outcome. Candidates differ — they cool down
+      // and the fallback chain takes over.
+      if (
+        !candidateConfig &&
+        (error instanceof WorkerAttemptTimeoutError ||
+          (error instanceof WorkerStreamError && error.turnCapExhausted))
+      )
+        break;
       continue;
     }
   }
@@ -1229,28 +1438,49 @@ async function runDropperStage(
   }
   let dropTokens = 0;
   let observationCoverageId: string | undefined;
+  // One pressure snapshot, taken before the mode-specific gates below and reused
+  // by the candidate selection, so the due-check the cursor records and the pool
+  // the dropper actually sees all describe the same pool. Manual mode reads the
+  // pending file once here and shares it with the gate below.
+  const pressurePending = isManualMode(runtime.config) ? readPendingState(sessionId) : undefined;
+  const pressurePoolSignature = activePoolSignature(entries, pressurePending);
+  const pressureReached = dropperPressureReached(
+    runtime.config,
+    observationPoolTokens(entries, pressurePending).tokens,
+  );
+  const pressureAlreadyChecked =
+    pressureReached && matchesEmptyPressurePool(runtime, pressurePoolSignature);
+  // Pressure bypasses the cadence and new-data gates only while this pool has
+  // not already been evaluated under pressure and left unchanged.
+  const pressureRun = pressureReached && !pressureAlreadyChecked;
+  // Advancing to "skipped"/"not_due" would replace the empty cursor and its
+  // signature, re-arming pressure against a pool the dropper already declined —
+  // so a pending pressure binding wins over bookkeeping advances.
+  const advanceDropperCursor = (entryId: string, state: "skipped" | "not_due"): void => {
+    if (!pressureAlreadyChecked) runtime.advanceCursor("dropper", entryId, state);
+  };
   if (isManualMode(runtime.config)) {
-    const pending = readPendingState(sessionId);
+    const pending = pressurePending ?? readPendingState(sessionId);
     // Check any accumulated batch for unprocessed observations, not just the latest
     const hasPendingObs = (pending.observationBatches ?? []).some(
       (b: any) => (b.data as any)?.observations?.length,
     );
-    if (!hasPendingObs) {
-      runtime.advanceCursor("dropper", entries.at(-1)?.id ?? "unknown", "skipped");
+    if (!hasPendingObs && !pressureRun) {
+      advanceDropperCursor(entries.at(-1)?.id ?? "unknown", "skipped");
       return "continue";
     }
     observationCoverageId = pending.observation?.coversUpToId;
     if (pending.dropped?.coversUpToId) {
       const obsIdx = entryIndexForId(entries, pending.observation?.coversUpToId ?? "");
       const dropIdx = entryIndexForId(entries, pending.dropped.coversUpToId);
-      if (obsIdx >= 0 && dropIdx >= 0 && obsIdx <= dropIdx) {
-        runtime.advanceCursor("dropper", pending.dropped.coversUpToId, "skipped");
+      if (obsIdx >= 0 && dropIdx >= 0 && obsIdx <= dropIdx && !pressureRun) {
+        advanceDropperCursor(pending.dropped.coversUpToId, "skipped");
         return "continue";
       }
       if (dropIdx >= 0) {
         dropTokens = rawTokensAfterIndex(entries, dropIdx);
-        if (dropTokens < runtime.config.reflectAfterTokens) {
-          runtime.advanceCursor("dropper", pending.dropped.coversUpToId, "not_due");
+        if (dropTokens < runtime.config.reflectAfterTokens && !pressureRun) {
+          advanceDropperCursor(pending.dropped.coversUpToId, "not_due");
           return "continue";
         }
       } else {
@@ -1261,16 +1491,20 @@ async function runDropperStage(
     }
   } else {
     dropTokens = rawTokensSinceDropCoverage(entries);
-    if (dropTokens < runtime.config.reflectAfterTokens) {
-      runtime.advanceCursor("dropper", entries.at(-1)?.id ?? "unknown", "not_due");
+    if (dropTokens < runtime.config.reflectAfterTokens && !pressureRun) {
+      advanceDropperCursor(entries.at(-1)?.id ?? "unknown", "not_due");
       return "continue";
     }
     observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
-    if (!observationCoverageId) {
-      runtime.advanceCursor("dropper", entries.at(-1)?.id ?? "unknown", "skipped");
+    if (!observationCoverageId && !pressureRun) {
+      advanceDropperCursor(entries.at(-1)?.id ?? "unknown", "skipped");
       return "continue";
     }
   }
+  // A pressure run must still be able to write its drop result somewhere: with
+  // the coverage gates bypassed there may be no observation marker to cover,
+  // so fall back to the branch tip rather than skipping the run.
+  if (!observationCoverageId) observationCoverageId = entries.at(-1)?.id ?? "unknown";
 
   for (let attempt = 0; attempt < MAX_STAGE_ATTEMPTS; attempt++) {
     const resolved = await resolveModel("dropper");
@@ -1280,17 +1514,24 @@ async function runDropperStage(
     const folded = foldLedger(entries);
     const pending = isManualMode(runtime.config) ? readPendingState(sessionId) : undefined;
     const lastDropIdx = pending ? -1 : latestCoverageIndex(entries, OM_OBSERVATIONS_DROPPED);
-    const newObservations = pending
-      ? pendingObservationsCreatedAfter(pending, entries, pending.dropped?.coversUpToId)
-      : observationsCreatedAfterIndex(entries, lastDropIdx);
+    // Candidate scope: a pressure run gets the whole live pool (with an empty
+    // post-drop delta there is nothing else to prune), cadence runs keep the
+    // post-last-drop delta — pending batches in manual mode, branch markers
+    // otherwise.
+    const newObservations = pressureRun
+      ? livePoolObservations(entries, pending)
+      : pending
+        ? pendingObservationsCreatedAfter(pending, entries, pending.dropped?.coversUpToId)
+        : observationsCreatedAfterIndex(entries, lastDropIdx);
     const dropperNewObsTokens = Math.ceil(
       newObservations.reduce((s: number, o: any) => s + o.content.length, 0) / 4,
     );
     const dropperSummaryBudget = Math.floor(runtime.config.dropperInputMaxTokens * 0.2);
-    const dropperInputTokens = Math.min(
-      dropperNewObsTokens + dropperSummaryBudget,
-      runtime.config.dropperInputMaxTokens,
-    );
+    // Deliberately uncapped: the prompt carries every candidate observation, so
+    // this has to be the size that will actually be sent — capping it at
+    // dropperInputMaxTokens would hide an oversized pressure prompt from the
+    // context-window check below and hand it to a model that cannot hold it.
+    const dropperInputTokens = dropperNewObsTokens + dropperSummaryBudget;
     // Adjust accumulated for pending coverage in manual mode
     let effectiveDropTokens = dropTokens;
     if (isManualMode(runtime.config)) {
@@ -1299,7 +1540,7 @@ async function runDropperStage(
         if (idx >= 0) effectiveDropTokens = rawTokensAfterIndex(entries, idx);
       }
     }
-    runtime.tryEmitInfo(
+    runtime.tryEmitWorkerInfo(
       ctx.hasUI,
       ctx.ui,
       `Observational memory: dropper running (~${effectiveDropTokens.toLocaleString()} tokens accumulated, ~${dropperInputTokens.toLocaleString()}-token input)`,
@@ -1390,6 +1631,7 @@ async function runDropperStage(
             signal,
             modelRegistry: ctx.modelRegistry,
             sessionId,
+            cacheRetention: runtime.config.cacheRetention,
           }),
       );
       if (!runtime.isGenerationActive(generation)) return "abort";
@@ -1415,11 +1657,18 @@ async function runDropperStage(
         }
         runtime.advanceCursor("dropper", coversUpToId, "recorded");
       } else {
-        // No drops selected (maxDropsAllowed=0 or LLM returned no candidates)
+        // No drops selected (maxDropsAllowed=0 or the model returned no
+        // candidates). Under pressure, bind that empty result to the branch tip
+        // and to this pool's id signature, so the next due-check skips an
+        // unchanged pool instead of repeating the same model call — a pool
+        // change rewrites the signature and re-arms pressure.
         runtime.advanceCursor(
           "dropper",
-          coversUpToId ?? observationCoverageId ?? entries.at(-1)?.id ?? "unknown",
+          pressureReached
+            ? (entries.at(-1)?.id ?? "unknown")
+            : (coversUpToId ?? observationCoverageId ?? entries.at(-1)?.id ?? "unknown"),
           "empty",
+          pressureReached ? pressurePoolSignature : undefined,
         );
       }
       return "continue";
@@ -1437,10 +1686,21 @@ async function runDropperStage(
         retryable: isRetryableError(error),
         deterministic: isDeterministicError(error),
         cooldownWorthy: isCooldownWorthyError(error),
+        // Drop candidates recorded before the run failed and discarded with it.
+        discardedCount: getDiscardedCount(error),
       });
       // A timed-out session model has no candidate config to cool down, so
-      // retrying would stall on the same model for the full deadline again.
-      if (!candidateConfig && error instanceof WorkerAttemptTimeoutError) break;
+      // retrying would stall on the same model for the full deadline again. A
+      // session model cut off by the agent turn cap fails the same way for the
+      // same reason: `agentMaxTurns` is global config, so a retry spends another
+      // whole budget on an identical outcome. Candidates differ — they cool down
+      // and the fallback chain takes over.
+      if (
+        !candidateConfig &&
+        (error instanceof WorkerAttemptTimeoutError ||
+          (error instanceof WorkerStreamError && error.turnCapExhausted))
+      )
+        break;
       continue;
     }
   }

@@ -3,11 +3,14 @@
  *
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/agents/observer/agent.ts)
  * Modified by pi-vcc-om: detects agent_end stopReason="error" in the stream
- * and throws if the API errored without collecting any tool results.
- * This allows the consolidation pipeline to fall back to alternative models.
+ * and throws unless the run already closed the chunk with a valid
+ * complete=true batch that recorded observations, so the consolidation
+ * pipeline can fall back to another model instead of advancing coversUpToId
+ * over a half-observed chunk. The same guard covers a run the agent turn cap
+ * cut off mid-chunk.
  */
 import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { buildAgentContext } from "../agent-context.js";
 import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
 import {
@@ -24,6 +27,11 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
+import {
+  withDiscardedCount,
+  WorkerStreamError,
+  workerStreamErrorMessage,
+} from "../../retryable-error.js";
 
 interface RunObserverArgs {
   model: Model<any>;
@@ -55,6 +63,13 @@ interface RunObserverArgs {
    * OpenCode `x-opencode-session`) without per-provider branching upstream.
    */
   sessionId?: string;
+  /**
+   * Provider-neutral prompt-cache retention preference
+   * (`SimpleStreamOptions.cacheRetention`). Unset defers to pi's effective
+   * setting (provider default `short`); adapters ignore values they do not
+   * support.
+   */
+  cacheRetention?: CacheRetention;
 }
 
 const RelevanceSchema = Type.Union([
@@ -82,8 +97,24 @@ const RecordObservationsSchema = Type.Object({
       }),
     }),
     {
-      description: "Batch of new observations. May be empty only if the tool is not called at all.",
+      // The empty batch is the only sanctioned way to close a chunk that yielded
+      // nothing, so it is paired with the flag. The previous wording also offered
+      // "if the tool is not called at all", which is both self-contradictory (an
+      // uncalled tool has no array) and points at the plain-text path the observer
+      // stage reports as a tool_not_called warning.
+      description:
+        "Batch of new observations. May be empty only alongside complete=true, " +
+        "which closes a run that found nothing new.",
     },
+  ),
+  // Optional on purpose: a model that omits the flag must lose only the
+  // early-stop hint, never the batch itself (a required field would fail
+  // host-side validation and drop every observation in the call).
+  complete: Type.Optional(
+    Type.Boolean({
+      description:
+        "Whether this batch completes chunk coverage. Set false when more observations or corrections remain.",
+    }),
   ),
 });
 
@@ -151,6 +182,11 @@ export type ObserverEmptyReason =
 export interface ObserverResult {
   observations: Observation[] | undefined;
   emptyReason?: ObserverEmptyReason;
+  /**
+   * Provider error from a turn after a valid complete=true close. The run kept
+   * its result (the chunk was declared covered); the caller should log this.
+   */
+  errorAfterClose?: string;
 }
 
 export async function runObserver(args: RunObserverArgs): Promise<ObserverResult> {
@@ -174,17 +210,30 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   let totalDuplicates = 0;
   let totalRejected = 0;
   let totalProposed = 0;
+  // Whether the most recent batch carried complete=true. An empty complete batch
+  // is the model closing a covered chunk that yielded nothing, which is a
+  // no_new_content outcome, not the empty_array protocol slip the kind implies.
+  let lastBatchComplete = false;
+  // Whether the run has closed the chunk with a fully valid complete=true batch,
+  // i.e. the model declared the chunk covered and the tool honored it. A later
+  // batch that changes nothing (empty or all duplicates; a host that ignores
+  // `terminate` asks for more turns) does not revoke the close. A later batch
+  // that is not itself a clean close and records or rejects anything does: new
+  // observations under complete=false mean the model found the chunk not yet
+  // covered, and rejections mean the tool just told it corrections remain.
+  let closedByCompleteBatch = false;
 
   const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
     name: "record_observations",
     label: "Record observations",
     description:
       "Record a batch of new observations distilled from the conversation chunk. " +
-      "Call this multiple times as you work through the chunk. Stop calling when coverage is complete, " +
-      "then emit a short plain-text confirmation to end the run.",
+      "complete=true ends fully valid chunk coverage; use complete=false when more observations or corrections remain. " +
+      "Incomplete or rejected work stays open.",
     parameters: RecordObservationsSchema,
     execute: async (_id, params: RecordObservationsArgs) => {
       toolCalled = true;
+      lastBatchComplete = params.complete === true;
       let added = 0;
       let duplicates = 0;
       let rejected = 0;
@@ -218,28 +267,58 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
         rejected > 0
           ? ` ${rejected} observation${rejected === 1 ? "" : "s"} rejected for missing or invalid sourceEntryIds.`
           : "";
+      const terminates = params.complete === true && rejected === 0;
+      if (terminates) closedByCompleteBatch = true;
+      else if (added > 0 || rejected > 0) closedByCompleteBatch = false;
+      const refusal =
+        params.complete === true && rejected > 0
+          ? ` complete=true was not honored: ${rejected} observation${rejected === 1 ? "" : "s"} in this batch still ${rejected === 1 ? "needs" : "need"} correcting — re-submit them with sourceEntryIds copied from the chunk; anything not re-submitted is discarded and will not be recorded.`
+          : "";
+      // The run totals are counter semantics, not a claim about this receipt:
+      // stated as what the number means, they stay true on the batch that
+      // creates the count as well as on later ones, and they tell the model not
+      // to re-propose against a count it already corrected.
+      const totals =
+        ` Run totals: ${accumulated.size} recorded, ` +
+        `${totalDuplicates} duplicate${totalDuplicates === 1 ? "" : "s"} skipped, ` +
+        `${totalRejected} rejected cumulatively across this run ` +
+        `(a count above zero does not mean corrections are still owed).`;
+      const guidance = terminates
+        ? ""
+        : ` Continue with complete=false while content remains or corrections are needed; use complete=true on the final valid batch.`;
       const ack =
         `Recorded ${added} new observation${added === 1 ? "" : "s"} ` +
         (duplicates > 0
           ? `(${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped).`
           : ".") +
         rejectedPart +
-        ` Total so far this run: ${accumulated.size}. ` +
-        `Continue if the chunk still has uncovered content; otherwise stop calling the tool and emit a short plain-text confirmation.`;
+        totals +
+        guidance +
+        refusal;
       return {
         content: [{ type: "text", text: ack }],
         details: { added, duplicates, rejected, total: accumulated.size },
+        // Per-batch gate, deliberately not run-scoped: an earlier rejection was
+        // reported in its own receipt and stays visible in the cumulative run
+        // totals, and a corrected later batch must still be able to close the
+        // run — run-wide gating would disable early-stop for the whole run
+        // after any single rejected entry, including runs that fixed it.
+        terminate: terminates,
       };
     },
   };
 
+  // The system prompt (OBSERVER_SYSTEM) is the append-stable prefix every
+  // observer run shares, so prompt-cache retention only pays off if nothing
+  // before the per-run chunk varies. The ledger blocks below it do change on
+  // every run, and the chunk is per-run by definition — hence the ordering.
   const userText = `CURRENT REFLECTIONS:
 ${joinOrEmpty(priorReflections)}
 
 CURRENT OBSERVATIONS:
 ${joinOrEmpty(priorObservations)}
 
-Compress the following new conversation chunk into observations by calling record_observations one or more times. Do not restate facts already present in current reflections or current observations. Stop calling the tool and reply with a short plain-text confirmation once the chunk is fully covered.
+Compress the following new conversation chunk into observations by calling record_observations one or more times. Use complete=false for partial batches or corrections, and use complete=true only on the final valid batch after the chunk is fully covered. If no observations are warranted, close the run with one record_observations call carrying an empty observations array and complete=true. Do not restate facts already present in current reflections or current observations.
 
 NEW CONVERSATION CHUNK:
 ${conversation}`;
@@ -257,6 +336,9 @@ ${conversation}`;
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
+  // Kept in scope past the config so the run can tell "the model stopped" from
+  // "the cap cut the model off".
+  const turnCap = effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : undefined;
   const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
   const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
     model,
@@ -264,12 +346,15 @@ ${conversation}`;
     headers,
     env,
     ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+    ...(args.cacheRetention ? { cacheRetention: args.cacheRetention } : {}),
     ...(providerFetch ? { fetch: providerFetch } : {}),
     maxTokens: boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS),
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : {}),
+    ...(turnCap
+      ? { shouldStopAfterTurn: turnCap.shouldStopAfterTurn, finishTurn: turnCap.finishTurn }
+      : {}),
   };
 
   const loop = args.agentLoop ?? agentLoop;
@@ -282,23 +367,56 @@ ${conversation}`;
   const streamFn = args.streamFn ?? bridgeStreamFn;
   const stream = loop(prompts, context, config, signal, streamFn);
   let agentError: string | undefined;
-  for await (const event of stream) {
-    // Drain events; the tool's execute already collects records.
-    if (event.type === "agent_end") {
-      const msgs = ((event as any).messages || []) as Array<{
-        stopReason?: string;
-        errorMessage?: string;
-      }>;
-      const lastMsg = msgs[msgs.length - 1];
-      if (lastMsg?.stopReason === "error") {
-        agentError = lastMsg.errorMessage ?? "Unknown API error";
+  try {
+    for await (const event of stream) {
+      // Drain events; the tool's execute already collects records.
+      if (event.type === "agent_end") {
+        const msgs = ((event as any).messages || []) as Array<{
+          stopReason?: string;
+          errorMessage?: string;
+        }>;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.stopReason === "error") {
+          agentError = lastMsg.errorMessage ?? "Unknown API error";
+        }
       }
     }
+    await stream.result();
+  } catch (error) {
+    // A stream that breaks outright never emits agent_end, so the guard below
+    // never sees it — yet the run still holds everything recorded so far.
+    throw withDiscardedCount(error, accumulated.size);
   }
-  await stream.result();
 
-  if (agentError && accumulated.size === 0) {
-    throw new Error(`Observer API error: ${agentError}`);
+  // A run that already closed the chunk with a valid complete=true batch that
+  // recorded something keeps its result however the loop ended: on a host that
+  // ignores `terminate`, a trailing turn that errors after the close must not
+  // discard the declared coverage, or the cursor never advances and the stage
+  // re-observes the same chunk every cycle. An empty close still throws, as it
+  // did before, so a provider failing after every tool call cannot turn each
+  // chunk into a silent "nothing new" skip. Any other error means the chunk
+  // may be partly covered.
+  if (agentError && !(closedByCompleteBatch && accumulated.size > 0)) {
+    // The message stays byte-identical: isDeterministicError scans it for bare
+    // 4xx codes, so an interpolated observation count could misclassify it.
+    throw new WorkerStreamError(workerStreamErrorMessage("Observer", agentError), accumulated.size);
+  }
+
+  // The turn cap ended the run before the model ever closed the chunk: the
+  // partial batch is not completed coverage, so returning it as success would
+  // advance coversUpToId and silently drop the tail of the chunk. Throwing
+  // keeps the cursor where it is and lets the stage's fallback chain retry.
+  // A valid close that recorded something already settled the chunk, so a cap
+  // firing after it changes nothing; a cap firing before anything was recorded
+  // is still an empty success (the stage advances the cursor as "empty"). The
+  // message names no status code: this is a config limit,
+  // not a provider failure, so it must not cool a session model as deterministic.
+  if (turnCap?.exhausted && accumulated.size > 0 && !closedByCompleteBatch) {
+    throw new WorkerStreamError(
+      `Observer turn cap exhausted: ${accumulated.size} observation${accumulated.size === 1 ? "" : "s"} recorded with no complete=true close`,
+      accumulated.size,
+      true,
+    );
   }
 
   if (accumulated.size === 0) {
@@ -311,12 +429,21 @@ ${conversation}`;
     } else if (totalDuplicates > 0 && totalAdded === 0) {
       emptyReason = { kind: "all_duplicates", count: totalDuplicates };
     } else if (totalProposed === 0) {
-      emptyReason = { kind: "empty_array", count: 0 };
+      // An empty batch flagged complete is the sanctioned "covered, nothing new"
+      // close, so it reports as no_new_content (info) rather than the warning an
+      // unflagged empty batch earns. The rejected/duplicate branches above keep
+      // priority, so an outstanding rejection is never masked by the close.
+      emptyReason = lastBatchComplete
+        ? { kind: "no_new_content" }
+        : { kind: "empty_array", count: 0 };
     } else {
       emptyReason = { kind: "no_new_content" };
     }
     return { observations: undefined, emptyReason };
   }
 
-  return { observations: Array.from(accumulated.values()) };
+  return {
+    observations: Array.from(accumulated.values()),
+    ...(agentError ? { errorAfterClose: agentError } : {}),
+  };
 }

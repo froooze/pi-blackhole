@@ -2,7 +2,19 @@
 
 **Deterministic compaction + session-aware observational memory for [Pi](https://github.com/earendil-works/pi) — in one unified extension.**
 
-`/blackhole` replaces Pi's LLM-based `/compact` with an algorithmic structural summary — fast, zero-cost. Three background workers (Observer, Reflector, Dropper) capture durable facts and decisions that survive across compactions. Per-worker model fallback chains with persisted cooldowns. Manual flush mode. One JSON file to configure it all.
+`/blackhole` replaces Pi's LLM-based `/compact` with an algorithmic structural summary — fast, and the compaction step itself is zero-cost. Three background workers (Observer, Reflector, Dropper) run as separate billed model calls to capture durable facts and decisions that survive across compactions. Per-worker model fallback chains with persisted cooldowns. Manual flush mode. One JSON file to configure it all.
+
+> **A note from the maintainer: this is experimental.**
+>
+> It won't save you tokens by itself. Compacting is free — no model call, just structure. Remembering is not: the background workers wake up as your session grows, read what happened, and write down what seems worth keeping. Those are real billed calls. Untuned, on your main coding model, this costs more than doing nothing. It only earns its keep with the workers on something cheap or free.
+>
+> It also doesn't solve compaction — nobody has, as far as I know. It takes a different approach ([observational memory](https://mastra.ai/blog/observational-memory), via [pi-observational-memory](https://github.com/elpapi42/pi-observational-memory)) and merges it with [pi-vcc](https://github.com/sting8k/pi-vcc), because the two conflicted when installed together. I merged them and vibeslopped a lot on top: robustness work, new behavior, and bugfixes ported from both upstreams. The recap is pattern-matching, not understanding: it guesses at goals and preferences from their shape. The memory is model-written, so it has the opposite weakness: it can keep what sounds right but isn't. Assume both need the search tool as a backstop.
+>
+> Want only one half? Use the project that does just that half. No hard feelings.
+>
+> Scope stays tight on purpose: forks welcome, bug fixes welcome and reviewed, new features only if they serve conversation compaction itself — not the week's AI fad bolted on. Almost everything is a toggle, which I'll admit is tiring; I use a small slice myself. Memory on most days, off some days. Workers on free models, waking rarely, size-based auto-compaction as a backstop. Most days I don't compact at all — fresh sessions beat resumed ones.
+>
+> Best fit is someone who doesn't count every token: code locally and push the workers to free hosted models, or code on a top model and run the workers on a local card — knowing each worker's different instructions wipe the local prompt cache for the next one. No measurements, no comparisons against other methods. Fast and nearly free the way I run it, good enough for what I need.
 
 ---
 
@@ -34,13 +46,12 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## ✨ What's new
 
-> **Latest release: [0.5.8](CHANGELOG.md)**
+> **Latest release: [0.5.10](CHANGELOG.md)**
 >
-> - **Pi loads a prebuilt bundle** — `pi.extensions` points at the tsup `dist/index.js` instead of TypeScript source, cutting startup import time (500–570 ms → 350–530 ms). Registry installs ship `dist/`; git installs need `npmCommand` set, and a missing `dist/` now warns instead of failing silently.
-> - **Every observation-pool readout agrees** — the dropper trigger, `/blackhole-memory` pool lines, and the footer P gauge each summed the pool inline; they now share one helper, and `/blackhole-memory` includes (and labels) manual-mode pending batches so the display matches what the trigger gates on. No threshold or candidate behavior changes. ([#120](https://github.com/k0valik/pi-blackhole/issues/120))
-> - **`agentMaxTurns` is enforced on Pi 0.87** — the worker loops emitted only the removed `shouldStopAfterTurn`, so the turn budget was silently ignored; `createTurnCap` now emits both that hook and 0.87's `finishTurn`, with independent counters. ([upstream OM `#83`](https://github.com/elpapi42/pi-observational-memory/pull/83))
-> - **Extension registration survives class-based hosts** — hooks were invoked detached from their API object, which threw on hosts like oh-my-pi; handlers are now bound before registration. ([#124](https://github.com/k0valik/pi-blackhole/pull/124))
-> - **Custom-provider streams keep their receiver** — captured `streamSimple` handlers are bound to their config, so class-based providers no longer crash or silently fall back to the compat dispatcher. ([upstream OM `#80`](https://github.com/elpapi42/pi-observational-memory/pull/80))
+> - **Memory workers that fail now fall back instead of silently skipping** — observer/reflector/dropper stream errors and turn-cap cutoffs throw into the model fallback chain, so a failed run no longer advances the cursor over work it never finished.
+> - **The turn cap only ends runs that did tool work** — a run that stops naturally on exactly its last allowed turn keeps its result instead of failing as cap-cut, and a capped session model is not retried on an identical budget.
+> - **`/blackhole` on an ineligible branch reports nothing-to-compact** — instead of Pi's error card plus a second failure toast when the branch already fits inside the keep-recent budget.
+> - **A cancelled `/blackhole` stays quiet, and the command loads the config first** — no second vaguer toast on cancel, and a `manual`-mode session flushes pending memory instead of reading defaults.
 >
 > See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
@@ -96,7 +107,7 @@ The agent gets one unified `recall` tool that handles every form of historical l
 
 When the agent expands a session entry (`#N`), related observations and reflections from the session ledger are automatically shown alongside the expanded content — so the agent gets the raw transcript _and_ the durable fact layer in one call.
 
-Every recall response is capped at `recallResponseMaxChars` (default 48,000 ≈ 12k tokens). Search snippet lines, expanded entries, and related observation bodies are clipped to keep a single huge stored message from flooding the context; a truncation marker names the omitted entries and how to continue (`#N:text` / `#N:path` / `page:N`).
+Every recall response is capped at `recallResponseMaxChars` (default 48,000 ≈ 12k tokens). Search snippet lines, expanded entries, drill-down bodies, and related observation bodies are clipped to keep a single huge stored message from flooding the context; a truncation marker names the omitted entries and how to continue (`#N:text` / `#N:path` / `page:N`). A capped drill-down cuts only at line boundaries and names the first line it did not show, so the next `#N:path:offset:limit` call continues there without skipping or repeating lines.
 
 The `/blackhole-recall` command exposes the same engine to the user. Results are shown as a collapsible message and auto-fed to the agent as context.
 

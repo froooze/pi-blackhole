@@ -7,12 +7,15 @@ import {
   makeModelResolver,
   runConsolidationPipeline,
   capSourceEntriesToTokens,
+  anyStageDue,
   type ConsolidationCtx,
 } from "../src/om/consolidation.js";
 import {
   branchSummary,
   compactionEntry,
   customMessage,
+  observation,
+  observationsDroppedEntry,
   observationsRecordedEntry,
   rawMessage,
   reflection,
@@ -21,6 +24,13 @@ import {
   type TestEntry,
 } from "./fixtures/session.js";
 import { createExtensionApiDouble } from "./fixtures/pi-extension-api.js";
+import {
+  clearPendingState,
+  readPendingState,
+  savePendingDropped,
+  savePendingObservation,
+} from "../src/om/pending.js";
+import { WorkerStreamError } from "../src/om/retryable-error.js";
 
 /** Cursor round trips write real pending files, so redirect the agent dir. */
 const cursorTestDir = join(tmpdir(), `pi-blackhole-consolidation-cursors-${Date.now()}`);
@@ -38,10 +48,17 @@ interface ObserverAgentInput {
   signal?: AbortSignal;
 }
 
+interface DropperAgentInput {
+  model: { provider: string; id: string };
+  observations: Array<{ id: string }>;
+  budgetTokens: number;
+  signal?: AbortSignal;
+}
+
 const agents = vi.hoisted(() => ({
   runObserver: vi.fn<(input: ObserverAgentInput) => Promise<unknown>>(),
   runReflector: vi.fn(),
-  runDropper: vi.fn(),
+  runDropper: vi.fn<(input: DropperAgentInput) => Promise<string[] | undefined>>(),
 }));
 vi.mock("../src/om/agents/observer/agent.js", () => ({ runObserver: agents.runObserver }));
 vi.mock("../src/om/agents/reflector/agent.js", () => ({ runReflector: agents.runReflector }));
@@ -867,6 +884,8 @@ function makePipelineFixture(options: {
   modelRegistry?: ConsolidationCtx["modelRegistry"];
   useRuntimeModelResolver?: boolean;
   sessionModel?: ConsolidationCtx["model"];
+  /** When set, the ctx exposes a UI so notifications are collected here. */
+  notify?: (message: string, level?: string) => void;
 }): PipelineFixture {
   const runtime = options.runtime ?? new Runtime();
   runtime.configLoaded = true;
@@ -897,7 +916,8 @@ function makePipelineFixture(options: {
   });
   const ctx = {
     cwd: "/tmp",
-    hasUI: false,
+    hasUI: options.notify !== undefined,
+    ui: options.notify ? { notify: options.notify } : undefined,
     model: options.sessionModel,
     modelRegistry: options.modelRegistry ?? {},
     sessionManager: { getBranch: () => entries, getSessionId: () => "cursor-session" },
@@ -920,6 +940,12 @@ function observerChunkArg(callIndex = 0): ObserverAgentInput {
   return call[0];
 }
 
+function dropperCallArg(callIndex = 0): DropperAgentInput {
+  const call = agents.runDropper.mock.calls[callIndex];
+  if (!call) throw new Error(`dropper ran ${agents.runDropper.mock.calls.length} time(s)`);
+  return call[0];
+}
+
 const smallSource = (id: string) => rawMessage(id, `SMALL-${id} ${"x".repeat(120)}`);
 
 beforeEach(() => {
@@ -929,6 +955,7 @@ beforeEach(() => {
     emptyReason: { kind: "no_new_content" as const },
   });
   agents.runReflector.mockReset();
+  agents.runReflector.mockResolvedValue({ reflections: [] });
   agents.runDropper.mockReset();
 });
 
@@ -1197,7 +1224,7 @@ describe("worker attempt hard timeout", () => {
     fixture.runtime.config.reflectAfterTokens = 100;
     fixture.runtime.config.workerAttemptTimeoutMs = 100;
     // Reflector resolves and completes empty so the pipeline reaches the dropper.
-    agents.runReflector.mockResolvedValue([]);
+    agents.runReflector.mockResolvedValue({ reflections: [] });
     agents.runDropper.mockImplementation((input) => {
       const signal = input.signal;
       if (!signal) return Promise.reject(new Error("dropper did not receive an attempt signal"));
@@ -1212,6 +1239,510 @@ describe("worker attempt hard timeout", () => {
 
     expect(agents.runReflector).toHaveBeenCalledTimes(1);
     expect(agents.runDropper).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("observer error after a kept close", () => {
+  function keptCloseFixture(errorAfterClose: string) {
+    const notices: Array<{ message: string; level?: string }> = [];
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100,
+      entries: [rawMessage("big-1", "x".repeat(40_000))],
+      notify: (message, level) => notices.push({ message, level }),
+    });
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runObserver.mockResolvedValue({
+      observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["big-1"] })],
+      errorAfterClose,
+    });
+    return { fixture, notices, retryable };
+  }
+
+  test("a deterministic error keeps the chunk and cools the model down", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("HTTP 401 Unauthorized");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "Observer API error: HTTP 401 Unauthorized" }),
+      "observer",
+    );
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (deterministic error"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("Unauthorized"))).toBe(false);
+  });
+
+  test("a bare status code is classified like the throw path", async () => {
+    const { fixture, retryable } = keptCloseFixture("401");
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "Observer API error: 401" }),
+      "observer",
+    );
+  });
+
+  test("a bare retryable code is not treated as deterministic", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("429");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
+  test("a status-shaped token count is not treated as a status code", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("processed 401 rows");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
+  test("a deterministic error on the session model cools that model down", async () => {
+    const { fixture, retryable } = keptCloseFixture("HTTP 401 Unauthorized");
+    const sessionModel = { provider: "test", id: "session", contextWindow: 1_000_000 };
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: sessionModel,
+      apiKey: "test",
+    });
+    const deterministic = vi
+      .spyOn(fixture.runtime, "recordDeterministicError")
+      .mockImplementation(() => {});
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
+    expect(retryable).toHaveBeenCalledWith(undefined, expect.any(Error), "observer");
+    expect(deterministic).toHaveBeenCalledWith(
+      sessionModel,
+      expect.objectContaining({ message: "Observer API error: HTTP 401 Unauthorized" }),
+      "observer",
+    );
+  });
+
+  test("a session model with no coolable identity does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptCloseFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("no cooldown recorded"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("details in cooldown log"))).toBe(false);
+  });
+
+  test("a transient error keeps the chunk and only warns", async () => {
+    const { fixture, notices, retryable } = keptCloseFixture("Stream connection severed");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("observer")).toEqual({ entryId: "big-1", state: "recorded" });
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("severed"))).toBe(false);
+  });
+
+  test("a transient error points at the debug log only when debugLog is on", async () => {
+    const { fixture, notices } = keptCloseFixture("Stream connection severed");
+    fixture.runtime.config.debugLog = true;
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("details in debug log"),
+      level: "warning",
+    });
+  });
+
+  test("a transient error does not promise a debug log entry when debugLog is off", async () => {
+    const { fixture, notices } = keptCloseFixture("Stream connection severed");
+
+    await fixture.run();
+
+    expect(fixture.runtime.config.debugLog).toBe(false);
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("enable debugLog for details"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("details in debug log"))).toBe(false);
+  });
+
+  test("a cooldownHours-0 candidate does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptCloseFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "candidate" as const,
+      candidateConfig: { provider: "test", id: "model", cooldownHours: 0 },
+      model: { provider: "test", id: "model", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("no cooldown recorded"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("cooldown log"))).toBe(false);
+  });
+});
+
+describe("reflector error after a kept close", () => {
+  function keptReviewFixture(errorAfterClose: string) {
+    const notices: Array<{ message: string; level?: string }> = [];
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100_000,
+      notify: (message, level) => notices.push({ message, level }),
+      entries: [
+        rawMessage("big-1", "x".repeat(40_000)),
+        observationsRecordedEntry("obs-1", {
+          coversUpToId: "big-1",
+          observations: [observation("aaaaaaaaaaaa", { tokenCount: 25 })],
+        }),
+      ],
+    });
+    fixture.runtime.config.reflectAfterTokens = 100;
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    const deterministic = vi
+      .spyOn(fixture.runtime, "recordDeterministicError")
+      .mockImplementation(() => {});
+    agents.runReflector.mockResolvedValue({
+      reflections: [reflection("rrrrrrrrrrrr", ["aaaaaaaaaaaa"])],
+      errorAfterClose,
+    });
+    return { fixture, notices, retryable, deterministic };
+  }
+
+  test("a deterministic error keeps the review and cools the model down", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("HTTP 401 Unauthorized");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("reflector")).toEqual({
+      entryId: "big-1",
+      state: "recorded",
+    });
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "Reflector API error: HTTP 401 Unauthorized" }),
+      "reflector",
+    );
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (deterministic error"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("Unauthorized"))).toBe(false);
+  });
+
+  test("a bare status code is classified like the throw path", async () => {
+    const { fixture, retryable } = keptReviewFixture("401");
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalledWith(
+      { provider: "test", id: "model" },
+      expect.objectContaining({ message: "Reflector API error: 401" }),
+      "reflector",
+    );
+  });
+
+  test("a bare retryable code is not treated as deterministic", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("429");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
+  test("a status-shaped token count is not treated as a status code", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("processed 401 rows");
+
+    await fixture.run();
+
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+  });
+
+  test("a deterministic error on the session model cools that model down", async () => {
+    const { fixture, retryable, deterministic } = keptReviewFixture("HTTP 401 Unauthorized");
+    const sessionModel = { provider: "test", id: "session", contextWindow: 1_000_000 };
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: sessionModel,
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("reflector")).toEqual({
+      entryId: "big-1",
+      state: "recorded",
+    });
+    expect(retryable).toHaveBeenCalledWith(undefined, expect.any(Error), "reflector");
+    expect(deterministic).toHaveBeenCalledWith(
+      sessionModel,
+      expect.objectContaining({ message: "Reflector API error: HTTP 401 Unauthorized" }),
+      "reflector",
+    );
+  });
+
+  test("a session model with no coolable identity does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptReviewFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("no cooldown recorded"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("details in cooldown log"))).toBe(false);
+  });
+
+  test("a transient error keeps the review and only warns", async () => {
+    const { fixture, notices, retryable } = keptReviewFixture("Stream connection severed");
+
+    await fixture.run();
+
+    expect(fixture.runtime.getCursor("reflector")).toEqual({
+      entryId: "big-1",
+      state: "recorded",
+    });
+    expect(retryable).not.toHaveBeenCalled();
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("later turn failed (transient error"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("severed"))).toBe(false);
+  });
+
+  test("a cooldownHours-0 candidate does not claim a cooldown log entry", async () => {
+    const { fixture, notices } = keptReviewFixture("HTTP 401 Unauthorized");
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "candidate" as const,
+      candidateConfig: { provider: "test", id: "model", cooldownHours: 0 },
+      model: { provider: "test", id: "model", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+
+    await fixture.run();
+
+    expect(notices).toContainEqual({
+      message: expect.stringContaining("no cooldown recorded"),
+      level: "warning",
+    });
+    expect(notices.some((n) => n.message.includes("cooldown log"))).toBe(false);
+  });
+});
+
+describe("observer turn-cap exhaustion", () => {
+  const turnCapError = () => new WorkerStreamError("Observer turn cap exhausted", 3, true);
+
+  test("a session model that exhausts the cap is not retried within the stage", async () => {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100,
+      entries: [rawMessage("big-1", "x".repeat(40_000))],
+    });
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { provider: "test", id: "session", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+    agents.runObserver.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    // The cap is a config limit: re-running the same model on the same chunk
+    // would burn another full budget, so the stage stops after one attempt.
+    expect(agents.runObserver).toHaveBeenCalledTimes(1);
+  });
+
+  test("a candidate that exhausts the cap cools down and the fallback is tried", async () => {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100,
+      entries: [rawMessage("big-1", "x".repeat(40_000))],
+    });
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runObserver.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalled();
+    expect(agents.runObserver.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+/** Entries that make the reflector due and the dropper due, but not the observer. */
+const workerStageEntries = [
+  rawMessage("big-1", "x".repeat(40_000)),
+  {
+    type: "custom",
+    id: "obs-1",
+    customType: "om.observations.recorded",
+    data: {
+      coversUpToId: "big-1",
+      observations: [{ id: "o1", content: "a".repeat(100), tokenCount: 25 }],
+    },
+  },
+] as const;
+
+function workerStageFixture(source: "session" | "candidate") {
+  const fixture = makePipelineFixture({
+    observeAfterTokens: 100_000,
+    entries: workerStageEntries as unknown as TestEntry[],
+  });
+  fixture.runtime.config.reflectAfterTokens = 100;
+  if (source === "session") {
+    fixture.runtime.resolveModel = async () => ({
+      ok: true as const,
+      source: "session" as const,
+      model: { provider: "test", id: "session", contextWindow: 1_000_000 },
+      apiKey: "test",
+    });
+  }
+  return fixture;
+}
+
+describe("reflector turn-cap exhaustion", () => {
+  const turnCapError = () =>
+    new WorkerStreamError(
+      "Reflector turn cap exhausted: 3 reflections recorded with no complete=true close",
+      3,
+      true,
+    );
+
+  test("a session model that exhausts the cap is not retried within the stage", async () => {
+    const fixture = workerStageFixture("session");
+    agents.runReflector.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    // `agentMaxTurns` is global config: a retry spends another whole budget on
+    // an identical outcome instead of reporting the exhausted budget.
+    expect(agents.runReflector).toHaveBeenCalledTimes(1);
+  });
+
+  test("a candidate that exhausts the cap cools down and the fallback is tried", async () => {
+    const fixture = workerStageFixture("candidate");
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runReflector.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalled();
+    expect(agents.runReflector.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("dropper turn-cap exhaustion", () => {
+  const turnCapError = () =>
+    new WorkerStreamError("Dropper turn cap exhausted: 3 drop candidates recorded", 3, true);
+
+  test("a session model that exhausts the cap is not retried within the stage", async () => {
+    const fixture = workerStageFixture("session");
+    agents.runReflector.mockResolvedValue({ reflections: [] });
+    agents.runDropper.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(agents.runDropper).toHaveBeenCalledTimes(1);
+  });
+
+  test("a candidate that exhausts the cap cools down and the fallback is tried", async () => {
+    const fixture = workerStageFixture("candidate");
+    agents.runReflector.mockResolvedValue({ reflections: [] });
+    const retryable = vi
+      .spyOn(fixture.runtime, "recordRetryableError")
+      .mockImplementation(() => {});
+    agents.runDropper.mockRejectedValue(turnCapError());
+
+    await fixture.run();
+
+    expect(retryable).toHaveBeenCalled();
+    expect(agents.runDropper.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("worker stream options", () => {
+  test("forwards the session id and cache retention to every memory worker", async () => {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100,
+      entries: [rawMessage("big-1", "x".repeat(40_000))],
+    });
+    fixture.runtime.config.reflectAfterTokens = 100;
+    fixture.runtime.config.cacheRetention = "long";
+    agents.runObserver.mockResolvedValue({
+      observations: [observation("aaaaaaaaaaaa", { sourceEntryIds: ["big-1"], tokenCount: 8_000 })],
+    });
+    agents.runReflector.mockResolvedValue({
+      reflections: [reflection("rrrrrrrrrrrr", ["aaaaaaaaaaaa"])],
+    });
+    agents.runDropper.mockResolvedValue([]);
+
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledOnce();
+    expect(agents.runReflector).toHaveBeenCalledOnce();
+    expect(agents.runDropper).toHaveBeenCalledOnce();
+    for (const calls of [
+      agents.runObserver.mock.calls,
+      agents.runReflector.mock.calls,
+      agents.runDropper.mock.calls,
+    ]) {
+      expect(calls[0]?.[0]).toMatchObject({
+        sessionId: "cursor-session",
+        cacheRetention: "long",
+      });
+    }
   });
 });
 
@@ -1572,5 +2103,363 @@ describe("observer preamble cap", () => {
     await fixture.run();
 
     expect(agents.runObserver).not.toHaveBeenCalled();
+  });
+});
+
+describe("dropper pressure valve", () => {
+  function pressureFixture(
+    options: {
+      observations?: ReturnType<typeof observation>[];
+      poolMaxTokens?: number;
+    } = {},
+  ): PipelineFixture {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 1_000_000,
+      entries: [
+        rawMessage("big-1", "x".repeat(400)),
+        observationsRecordedEntry("obs-1", {
+          coversUpToId: "big-1",
+          observations: options.observations ?? [
+            observation("aaaaaaaaaaaa", { tokenCount: 800, sourceEntryIds: ["big-1"] }),
+            observation("bbbbbbbbbbbb", { tokenCount: 200, sourceEntryIds: ["big-1"] }),
+          ],
+        }),
+        observationsDroppedEntry("drop-0", {
+          coversUpToId: "obs-1",
+          observationIds: ["older-observation"],
+        }),
+      ],
+    });
+    fixture.runtime.config.reflectAfterTokens = 1_000_000;
+    fixture.runtime.config.observationsPoolMaxTokens = options.poolMaxTokens ?? 1_000;
+    fixture.runtime.config.dropperPoolFullnessThreshold = 0.1;
+    fixture.runtime.config.dropperPressureThreshold = 0.7;
+    fixture.runtime.advanceCursor("dropper", "obs-1", "skipped");
+    return fixture;
+  }
+
+  test("the dropper stage honors the dropperPoolFullness floor over a lower pressure threshold", async () => {
+    // Pool is 1,000 / 2,000 tokens (50%): well over the 10% pressure
+    // threshold, but under the configured 60% fullness floor.
+    const fixture = pressureFixture({ poolMaxTokens: 2_000 });
+    fixture.runtime.config.dropperPressureThreshold = 0.1;
+    fixture.runtime.config.dropperPoolFullnessThreshold = 0.6;
+    agents.runDropper.mockResolvedValue([]);
+
+    await fixture.run();
+
+    expect(agents.runDropper).not.toHaveBeenCalled();
+  });
+
+  test("the due-check applies the same fullness floor as the stage", async () => {
+    const fixture = pressureFixture({ poolMaxTokens: 2_000 });
+    fixture.runtime.config.dropperPressureThreshold = 0.1;
+    fixture.runtime.config.dropperPoolFullnessThreshold = 0.6;
+
+    expect(anyStageDue(fixture.entries, fixture.runtime)).toBe(false);
+
+    fixture.runtime.config.dropperPoolFullnessThreshold = 0.4;
+    expect(anyStageDue(fixture.entries, fixture.runtime)).toBe(true);
+  });
+
+  test("pressure runs over the full live pool when the post-drop delta is empty", async () => {
+    const fixture = pressureFixture();
+    agents.runDropper.mockResolvedValue(["aaaaaaaaaaaa"]);
+
+    await fixture.run();
+
+    expect(agents.runDropper).toHaveBeenCalledOnce();
+    expect(dropperCallArg().observations.map((observation) => observation.id)).toEqual([
+      "aaaaaaaaaaaa",
+      "bbbbbbbbbbbb",
+    ]);
+    expect(
+      fixture.entries.filter(
+        (entry) => entry.customType === "om.observations.dropped" && entry.id !== "drop-0",
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("skips an undersized primary model for an uncapped pressure prompt and uses fallback", async () => {
+    const fixture = pressureFixture({
+      poolMaxTokens: 5_000,
+      observations: [
+        observation("aaaaaaaaaaaa", {
+          content: "x".repeat(20_000),
+          tokenCount: 5_000,
+          sourceEntryIds: ["big-1"],
+        }),
+      ],
+    });
+    fixture.runtime.config.dropperInputMaxTokens = 1_000;
+    fixture.runtime.config.dropperModel = { provider: "test", id: "primary", cooldownHours: 0 };
+    fixture.runtime.config.dropperFallbackModels = [{ provider: "test", id: "fallback" }];
+    let resolutionCount = 0;
+    const resolveModel = vi.fn(async () => ({
+      ok: true as const,
+      model:
+        resolutionCount++ === 0
+          ? { provider: "test", id: "primary", contextWindow: 10_000 }
+          : { provider: "test", id: "fallback", contextWindow: 20_000 },
+      apiKey: "test",
+    }));
+    fixture.runtime.resolveModel = resolveModel;
+    agents.runDropper.mockResolvedValue([]);
+
+    await fixture.run();
+
+    expect({
+      resolutionCount: resolveModel.mock.calls.length,
+      dropperModels: agents.runDropper.mock.calls.map(([input]) => input.model.id),
+    }).toEqual({ resolutionCount: 2, dropperModels: ["fallback"] });
+  });
+
+  test("does not retry an empty pressure run against the unchanged active pool", async () => {
+    const fixture = pressureFixture();
+    agents.runDropper.mockResolvedValue([]);
+
+    await fixture.run();
+    expect(anyStageDue(fixture.entries, fixture.runtime)).toBe(false);
+    await fixture.run();
+    await fixture.run();
+
+    expect(agents.runDropper).toHaveBeenCalledOnce();
+  });
+
+  function expectPressureRerunWithChangedPool(): void {
+    expect(agents.runDropper).toHaveBeenCalledTimes(2);
+    expect(dropperCallArg(1).observations.map((observation) => observation.id)).toEqual([
+      "aaaaaaaaaaaa",
+      "bbbbbbbbbbbb",
+      "cccccccccccc",
+    ]);
+  }
+
+  test("re-enables pressure after the automatic active pool changes", async () => {
+    const fixture = pressureFixture();
+    agents.runDropper.mockResolvedValue([]);
+    await fixture.run();
+
+    fixture.entries.push(
+      observationsRecordedEntry("obs-2", {
+        coversUpToId: "big-1",
+        observations: [observation("cccccccccccc", { tokenCount: 100, sourceEntryIds: ["big-1"] })],
+      }),
+    );
+    expect(anyStageDue(fixture.entries, fixture.runtime)).toBe(true);
+    await fixture.run();
+
+    expectPressureRerunWithChangedPool();
+  });
+
+  test("re-enables pressure after the manual pending pool changes", async () => {
+    clearPendingState("cursor-session");
+    const fixture = pressureFixture();
+    fixture.runtime.config.compaction = "manual";
+    agents.runDropper.mockResolvedValue([]);
+    await fixture.run();
+
+    savePendingObservation("cursor-session", {
+      coversUpToId: "big-1",
+      data: {
+        observations: [observation("cccccccccccc", { tokenCount: 100, sourceEntryIds: ["big-1"] })],
+      },
+    });
+    expect(anyStageDue(fixture.entries, fixture.runtime, readPendingState("cursor-session"))).toBe(
+      true,
+    );
+    await fixture.run();
+
+    expectPressureRerunWithChangedPool();
+  });
+
+  test("manual pressure bypasses covered-data gates and records the drop", async () => {
+    clearPendingState("cursor-session");
+    const fixture = makePipelineFixture({ observeAfterTokens: 1_000_000 });
+    fixture.entries.push(rawMessage("raw-1", "x".repeat(400)));
+    fixture.runtime.config.compaction = "manual";
+    fixture.runtime.config.reflectAfterTokens = 1_000_000;
+    fixture.runtime.config.observationsPoolMaxTokens = 1_000;
+    fixture.runtime.config.dropperPoolFullnessThreshold = 0.1;
+    fixture.runtime.config.dropperPressureThreshold = 0.7;
+    savePendingObservation("cursor-session", {
+      coversUpToId: "raw-1",
+      data: {
+        observations: [
+          observation("aaaaaaaaaaaa", { tokenCount: 800, sourceEntryIds: ["raw-1"] }),
+          observation("bbbbbbbbbbbb", { tokenCount: 200, sourceEntryIds: ["raw-1"] }),
+        ],
+      },
+    });
+    savePendingDropped("cursor-session", {
+      coversUpToId: "raw-1",
+      data: { coversUpToId: "raw-1", observationIds: ["older-observation"] },
+    });
+    fixture.runtime.advanceCursor("dropper", "raw-1", "skipped");
+    agents.runDropper.mockResolvedValue(["aaaaaaaaaaaa"]);
+
+    await fixture.run();
+
+    expect(dropperCallArg().observations.map((observation) => observation.id)).toEqual([
+      "aaaaaaaaaaaa",
+      "bbbbbbbbbbbb",
+    ]);
+    expect(readPendingState("cursor-session").dropped?.data).toMatchObject({
+      coversUpToId: "raw-1",
+      observationIds: ["aaaaaaaaaaaa"],
+    });
+    await fixture.run();
+    expect(agents.runDropper).toHaveBeenCalledOnce();
+  });
+});
+
+// ── showWorkerNotifications — routine worker progress toasts ────────────────
+
+/** Every info-level toast collected from the fixture's UI notify spy. */
+function infoCalls(notify: ReturnType<typeof vi.fn>): unknown[][] {
+  return notify.mock.calls.filter(([, level]) => level === "info");
+}
+
+describe("showWorkerNotifications", () => {
+  function observerFixture(notify: (message: string, level?: string) => void): PipelineFixture {
+    const fixture = makePipelineFixture({ observeAfterTokens: 5_000, notify });
+    fixture.entries.push(rawMessage("big-1", `BIG-1 ${"y".repeat(40_000)}`));
+    return fixture;
+  }
+
+  /** Reflector due, observer not due: the reflector toast is the first info. */
+  function reflectorFixture(notify: (message: string, level?: string) => void): PipelineFixture {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 100_000,
+      notify,
+      entries: [
+        rawMessage("big-1", `BIG-1 ${"y".repeat(40_000)}`),
+        observationsRecordedEntry("obs-1", {
+          coversUpToId: "big-1",
+          observations: [
+            observation("aaaaaaaaaaaa", { tokenCount: 25, sourceEntryIds: ["big-1"] }),
+          ],
+        }),
+      ],
+    });
+    fixture.runtime.config.reflectAfterTokens = 100;
+    return fixture;
+  }
+
+  /** Dropper due via pool pressure; observer and reflector both not due. */
+  function dropperFixture(notify: (message: string, level?: string) => void): PipelineFixture {
+    const fixture = makePipelineFixture({
+      observeAfterTokens: 1_000_000,
+      notify,
+      entries: [
+        rawMessage("big-1", "x".repeat(400)),
+        observationsRecordedEntry("obs-1", {
+          coversUpToId: "big-1",
+          observations: [
+            observation("aaaaaaaaaaaa", { tokenCount: 800, sourceEntryIds: ["big-1"] }),
+            observation("bbbbbbbbbbbb", { tokenCount: 200, sourceEntryIds: ["big-1"] }),
+          ],
+        }),
+      ],
+    });
+    fixture.runtime.config.reflectAfterTokens = 1_000_000;
+    fixture.runtime.config.observationsPoolMaxTokens = 1_000;
+    fixture.runtime.config.dropperPoolFullnessThreshold = 0.1;
+    fixture.runtime.config.dropperPressureThreshold = 0.7;
+    fixture.runtime.advanceCursor("dropper", "obs-1", "skipped");
+    return fixture;
+  }
+
+  test("emits the observer progress toast by default", async () => {
+    const notify = vi.fn();
+    const fixture = observerFixture(notify);
+
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledOnce();
+    expect(infoCalls(notify).map(([message]) => message)).toEqual([
+      expect.stringContaining("Observational memory: observer running on ~"),
+    ]);
+  });
+
+  test("suppresses the observer progress toast when disabled, without skipping the worker", async () => {
+    const notify = vi.fn();
+    const fixture = observerFixture(notify);
+    fixture.runtime.config.showWorkerNotifications = false;
+
+    await fixture.run();
+
+    expect(agents.runObserver).toHaveBeenCalledOnce();
+    expect(infoCalls(notify)).toEqual([]);
+  });
+
+  test("keeps warning-level worker notices visible when disabled", async () => {
+    const notify = vi.fn();
+    const fixture = observerFixture(notify);
+    fixture.runtime.config.showWorkerNotifications = false;
+    agents.runObserver.mockResolvedValue({
+      observations: [],
+      emptyReason: { kind: "all_rejected" as const, count: 2 },
+    });
+
+    await fixture.run();
+
+    expect(notify).toHaveBeenCalledWith(
+      "Observational memory: no observations — 2 observation(s) rejected for invalid sourceEntryIds",
+      "warning",
+    );
+  });
+
+  test("emits the reflector progress toast by default", async () => {
+    const notify = vi.fn();
+    const fixture = reflectorFixture(notify);
+    agents.runReflector.mockResolvedValue({ reflections: [] });
+
+    await fixture.run();
+
+    expect(agents.runObserver).not.toHaveBeenCalled();
+    expect(agents.runReflector).toHaveBeenCalledOnce();
+    expect(infoCalls(notify).map(([message]) => message)).toEqual([
+      expect.stringContaining("Observational memory: reflector running (~"),
+    ]);
+  });
+
+  test("suppresses the reflector progress toast when disabled", async () => {
+    const notify = vi.fn();
+    const fixture = reflectorFixture(notify);
+    fixture.runtime.config.showWorkerNotifications = false;
+    agents.runReflector.mockResolvedValue({ reflections: [] });
+
+    await fixture.run();
+
+    expect(agents.runReflector).toHaveBeenCalledOnce();
+    expect(infoCalls(notify)).toEqual([]);
+  });
+
+  test("emits the dropper progress toast by default", async () => {
+    const notify = vi.fn();
+    const fixture = dropperFixture(notify);
+    agents.runDropper.mockResolvedValue([]);
+
+    await fixture.run();
+
+    expect(agents.runObserver).not.toHaveBeenCalled();
+    expect(agents.runReflector).not.toHaveBeenCalled();
+    expect(agents.runDropper).toHaveBeenCalledOnce();
+    expect(infoCalls(notify).map(([message]) => message)).toEqual([
+      expect.stringContaining("Observational memory: dropper running (~"),
+    ]);
+  });
+
+  test("suppresses the dropper progress toast when disabled", async () => {
+    const notify = vi.fn();
+    const fixture = dropperFixture(notify);
+    fixture.runtime.config.showWorkerNotifications = false;
+    agents.runDropper.mockResolvedValue([]);
+
+    await fixture.run();
+
+    expect(agents.runDropper).toHaveBeenCalledOnce();
+    expect(infoCalls(notify)).toEqual([]);
   });
 });

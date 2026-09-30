@@ -7,9 +7,17 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { applyEnvOverrides, DECLARATIVE_ENV_OVERRIDES, MAX_TIMER_DELAY_MS } from "./config-env.js";
+import {
+  applyEnvOverrides,
+  CACHE_RETENTION_VALUES,
+  DECLARATIVE_ENV_OVERRIDES,
+  MAX_TIMER_DELAY_MS,
+  normalizeCacheRetention,
+} from "./config-env.js";
+
+export { CACHE_RETENTION_VALUES, normalizeCacheRetention };
 import { getAgentDir as originalGetAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { CacheRetention, ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 // ── getAgentDir with PI_CODING_AGENT_DIR override ───────────────────────────
 
@@ -83,7 +91,8 @@ export interface UnifiedConfig {
   /** Unified compaction control: "auto" | "manual" | "off".
    *  "auto"   — auto-trigger on compactAfterTokens threshold
    *  "manual"  — only via /blackhole command
-   *  "off"    — never compact (disables auto + blocks /blackhole) */
+   *  "off"    — never auto-compact and never own Pi's own /compact; an explicit
+   *             /blackhole still runs the blackhole pipeline (see CONFIG.md) */
   compaction: "auto" | "manual" | "off";
 
   /** Which engine handles compaction.
@@ -206,9 +215,8 @@ export interface UnifiedConfig {
   reflectorInputMaxTokens: number;
   /** Max prompt tokens for dropper model input (rolling window cap). */
   dropperInputMaxTokens: number;
-  /** Pressure threshold for dropper.  When active observation pool tokens exceed
-   *  this fraction of reflectorInputMaxTokens, the dropper runs even without new
-   *  observations/reflections (to keep the pool pruned).
+  /** Fraction of observationsPoolMaxTokens that triggers pressure-driven
+   *  dropping without new data. A value of 1 disables pressure.
    *  Default 0.70 (70%). Must be in range (0, 1]. */
   dropperPressureThreshold: number;
   /** Minimum observation-pool fullness (fraction of observationsPoolMaxTokens)
@@ -230,6 +238,11 @@ export interface UnifiedConfig {
   /** Hard elapsed deadline for each worker/model attempt, including headers,
    *  streaming, tool turns, and final confirmation. Unset or 0 disables it. */
   workerAttemptTimeoutMs?: number;
+  /** Provider-neutral prompt-cache retention preference for the memory
+   *  workers. Unset defers to pi's effective setting (provider default
+   *  `short`); adapters ignore values they do not support, so `long` is
+   *  opt-in rather than our default. */
+  cacheRetention?: CacheRetention;
 
   /** Base model override for all memory workers. */
   model?: OmModelConfig;
@@ -261,6 +274,10 @@ export interface UnifiedConfig {
   debugLog: boolean;
   /** Show the blackhole footer status bar (token gauges + worker events). */
   statusBar: boolean;
+  /** Show routine observer/reflector/dropper progress toasts. Warnings,
+   *  errors, model fallback/unavailability and compaction notices are
+   *  unaffected. */
+  showWorkerNotifications: boolean;
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
@@ -314,10 +331,12 @@ export const DEFAULTS: UnifiedConfig = {
   // silently drops them when saving from the settings modal.
   providerIdleTimeoutMs: undefined,
   workerAttemptTimeoutMs: undefined,
+  cacheRetention: undefined,
 
   memory: true,
   debugLog: false,
   statusBar: true,
+  showWorkerNotifications: true,
 };
 
 /**
@@ -541,6 +560,10 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
     c.compactionSummaryMode = raw.compactionSummaryMode;
   if (isTailBehavior(raw.tailBehavior)) c.tailBehavior = raw.tailBehavior;
   if (isMidRunCompaction(raw.midRunCompaction)) c.midRunCompaction = raw.midRunCompaction;
+  // cacheRetention is the one string enum that canonicalizes: the raw value is
+  // normalized so a hand-edited "LONG" resolves the same as the env var's.
+  const cacheRetention = normalizeCacheRetention(raw.cacheRetention);
+  if (cacheRetention) c.cacheRetention = cacheRetention;
 
   // Threshold knobs (compactAfterTokens / Ratio / Reserve / Preset /
   // Presets / providerIdleTimeoutMs / workerAttemptTimeoutMs) — copied bluntly, then scrubbed by the
@@ -582,6 +605,8 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   if (typeof raw.fullFoldAlways === "boolean") c.fullFoldAlways = raw.fullFoldAlways;
   if (typeof raw.debugLog === "boolean") c.debugLog = raw.debugLog;
   if (typeof raw.statusBar === "boolean") c.statusBar = raw.statusBar;
+  if (typeof raw.showWorkerNotifications === "boolean")
+    c.showWorkerNotifications = raw.showWorkerNotifications;
 
   // Numeric fields — use nonNegativeInt for keys where 0 is meaningful
   // (observerPreambleMaxTokens 0 = auto, retainedToolOutputMaxTokens 0 = disabled)

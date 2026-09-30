@@ -61,6 +61,7 @@ describe("Config defaults", () => {
     expect(config.agentMaxTurns).toBe(16);
     expect(config.memory).toBe(true);
     expect(config.debugLog).toBe(false);
+    expect(config.showWorkerNotifications).toBe(true);
     expect(config.model).toBeUndefined();
     expect(config.observerModel).toBeUndefined();
     expect(config.reflectorModel).toBeUndefined();
@@ -260,6 +261,137 @@ describe("workerAttemptTimeoutMs", () => {
     const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
     writeConfig({ workerAttemptTimeoutMs: 1.5 });
     expect(loadUnifiedConfig(testDir).workerAttemptTimeoutMs).toBeUndefined();
+  });
+});
+
+describe("showWorkerNotifications", () => {
+  it("defaults to true when no config file exists", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    expect(loadUnifiedConfig(testDir).showWorkerNotifications).toBe(true);
+  });
+
+  it("honors an explicit false from the config file", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    writeConfig({ showWorkerNotifications: false });
+    expect(loadUnifiedConfig(testDir).showWorkerNotifications).toBe(false);
+  });
+
+  it("ignores a non-boolean file value", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    writeConfig({ showWorkerNotifications: "no" });
+    expect(loadUnifiedConfig(testDir).showWorkerNotifications).toBe(true);
+  });
+
+  it("env override wins over the file value", async () => {
+    process.env.PI_BLACKHOLE_SHOW_WORKER_NOTIFICATIONS = "false";
+    try {
+      const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+      writeConfig({ showWorkerNotifications: true });
+      expect(loadUnifiedConfig(testDir).showWorkerNotifications).toBe(false);
+    } finally {
+      delete process.env.PI_BLACKHOLE_SHOW_WORKER_NOTIFICATIONS;
+    }
+  });
+});
+
+describe("cacheRetention", () => {
+  const envKey = "PI_BLACKHOLE_CACHE_RETENTION";
+  const mgrDir = join(testDir, "mgr-cache-retention");
+
+  afterEach(() => {
+    delete process.env[envKey];
+    rmSync(mgrDir, { recursive: true, force: true });
+  });
+
+  async function modalCacheRetention(data: Record<string, unknown>): Promise<unknown> {
+    const { config } = await import("../src/pi-base/blackhole-settings.js");
+    mkdirSync(mgrDir, { recursive: true });
+    writeFileSync(join(mgrDir, "pi-blackhole-config.json"), JSON.stringify(data, null, 2));
+    const loaded = config.loadWithWarnings(undefined, mgrDir).config as {
+      cacheRetention?: unknown;
+    };
+    return loaded.cacheRetention;
+  }
+
+  it("stays unset by default so pi's own retention applies", async () => {
+    const { loadUnifiedConfig, DEFAULTS } = await import("../src/core/unified-config.js");
+    expect(DEFAULTS.cacheRetention).toBeUndefined();
+    expect(loadUnifiedConfig(testDir).cacheRetention).toBeUndefined();
+  });
+
+  it("accepts every supported retention value from the file", async () => {
+    const { loadUnifiedConfig, CACHE_RETENTION_VALUES } =
+      await import("../src/core/unified-config.js");
+    for (const cacheRetention of CACHE_RETENTION_VALUES) {
+      writeConfig({ cacheRetention });
+      expect(loadUnifiedConfig(testDir).cacheRetention).toBe(cacheRetention);
+    }
+  });
+
+  it("ignores an unsupported file value", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    writeConfig({ cacheRetention: "forever" });
+    expect(loadUnifiedConfig(testDir).cacheRetention).toBeUndefined();
+  });
+
+  it("normalizes letter case from the file", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    writeConfig({ cacheRetention: "LONG" });
+    expect(loadUnifiedConfig(testDir).cacheRetention).toBe("long");
+  });
+
+  it("normalizes letter case from the env var", async () => {
+    process.env[envKey] = "LoNg";
+    try {
+      const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+      writeConfig({ cacheRetention: "none" });
+      expect(loadUnifiedConfig(testDir).cacheRetention).toBe("long");
+    } finally {
+      delete process.env[envKey];
+    }
+  });
+
+  it("normalizes letter case on the settings-modal loader too", async () => {
+    expect(await modalCacheRetention({ cacheRetention: "SHORT" })).toBe("short");
+  });
+
+  it("env override wins over the file value", async () => {
+    process.env[envKey] = "long";
+    try {
+      const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+      writeConfig({ cacheRetention: "none" });
+      expect(loadUnifiedConfig(testDir).cacheRetention).toBe("long");
+    } finally {
+      delete process.env[envKey];
+    }
+  });
+
+  it("an unsupported env value leaves the file value in place", async () => {
+    process.env[envKey] = "forever";
+    try {
+      const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+      writeConfig({ cacheRetention: "short" });
+      expect(loadUnifiedConfig(testDir).cacheRetention).toBe("short");
+    } finally {
+      delete process.env[envKey];
+    }
+  });
+
+  it("resolves identically on the file loader and the settings-modal loader", async () => {
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    for (const data of [
+      { cacheRetention: "long" },
+      { cacheRetention: "forever" },
+      // Modal "unset" sentinel must never survive into an effective value.
+      { cacheRetention: "unset" },
+      {},
+    ]) {
+      writeConfig(data);
+      const viaFileLoader = loadUnifiedConfig(testDir).cacheRetention;
+      expect(await modalCacheRetention(data)).toBe(viaFileLoader);
+    }
+    writeConfig({ cacheRetention: "long" });
+    expect(await modalCacheRetention({ cacheRetention: "long" })).toBe("long");
   });
 });
 
