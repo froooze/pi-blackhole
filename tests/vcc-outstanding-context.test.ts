@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
-import { buildSections } from "../src/core/build-sections.js";
+import { buildSections, pathTokens } from "../src/core/build-sections.js";
 import type { NormalizedBlock } from "../src/types.js";
 
 const assistant = (text: string): NormalizedBlock => ({ kind: "assistant", text });
@@ -146,35 +146,87 @@ describe("extractOutstandingContext — tool errors unchanged", () => {
 
 describe("extractOutstandingContext — long tool output", () => {
   it.each([
-    { isError: false, count: "0\n" },
-    { isError: true, count: "1\n" },
-  ])("finishes scanning a long encoded tool result (isError=$isError)", ({ isError, count }) => {
-    // A synchronous regex hang also blocks an in-process test timeout.
-    const child = spawnSync(
-      process.execPath,
-      [
-        "--input-type=module",
-        "-e",
-        `
+    // Dotless blob: exercises the unanchored-rescan half of the fix.
+    { kind: "dotless", isError: false, payload: `"A".repeat(30000)`, count: 0 },
+    { kind: "dotless", isError: true, payload: `"A".repeat(30000)`, count: 1 },
+    // Dot-bearing blob: exercises the overlapping-repetition (pre-dot
+    // lookbehind) half. Reverting that half leaves the dotless cases green.
+    { kind: "dotted", isError: false, payload: `"A.".repeat(15000)`, count: 0 },
+    { kind: "dotted", isError: true, payload: `"A.".repeat(15000)`, count: 1 },
+  ])(
+    "finishes scanning a $kind long encoded tool result (isError=$isError)",
+    ({ isError, payload, count }) => {
+      // A synchronous regex hang also blocks an in-process test timeout.
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
           import { createRequire } from "node:module";
           const require = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
           const { createJiti } = require("jiti");
           const jiti = createJiti(import.meta.url, { fsCache: false });
           const { buildSections } = await jiti.import("./src/core/build-sections.ts");
-          const text = JSON.stringify({ dbxs: [{ content: "A".repeat(30000) }] });
+          const text = JSON.stringify({ dbxs: [{ content: ${payload} }] });
+          const t0 = performance.now();
           const sections = buildSections({
             blocks: [{ kind: "tool_result", name: "read", text, isError: ${isError} }],
           });
-          console.log(sections.outstandingContext.length);
+          console.log(JSON.stringify({ ms: performance.now() - t0, n: sections.outstandingContext.length }));
         `,
-      ],
-      { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 5000 },
-    );
-    expect({ error: child.error?.message, status: child.status, stdout: child.stdout }).toEqual({
-      error: undefined,
-      status: 0,
-      stdout: count,
-    });
+        ],
+        // Startup (Node boot + jiti transpile, fsCache disabled) is charged
+        // here too, so the deadline must exceed any plausible startup; the
+        // scan itself is budgeted separately below from inside the child.
+        { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 30_000 },
+      );
+      expect({
+        error: child.error?.message,
+        status: child.status,
+        stdout: child.stdout,
+        stderr: child.stderr,
+      }).toEqual({ error: undefined, status: 0, stdout: expect.any(String), stderr: "" });
+      const body = JSON.parse(child.stdout) as { ms?: unknown; n?: unknown };
+      if (typeof body.ms !== "number" || typeof body.n !== "number") {
+        throw new Error(`unexpected child output: ${child.stdout}`);
+      }
+      expect(body.n).toBe(count);
+      expect(body.ms).toBeLessThan(5_000);
+    },
+  );
+});
+
+describe("extractOutstandingContext — path token bounds", () => {
+  it("caps collected tokens on dot-dense input", () => {
+    const distinct = Array.from({ length: 2000 }, (_, i) => `src/f${i}.txt`).join(" ");
+    expect(pathTokens(distinct).size).toBeLessThanOrEqual(500);
+  });
+
+  it("still matches a path at the head before a large blob", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "tool_result", name: "edit", text: "Could not update src/target.ts", isError: true },
+      {
+        kind: "tool_result",
+        name: "edit",
+        text: `Updated src/target.ts. ${"A".repeat(20000)}`,
+        isError: false,
+      },
+    ];
+    expect(buildSections({ blocks }).outstandingContext).toEqual([]);
+  });
+
+  it("still matches a path at the tail after a large blob", () => {
+    const blocks: NormalizedBlock[] = [
+      { kind: "tool_result", name: "edit", text: "Could not update src/target.ts", isError: true },
+      {
+        kind: "tool_result",
+        name: "edit",
+        text: `${"A".repeat(20000)} Updated src/target.ts.`,
+        isError: false,
+      },
+    ];
+    expect(buildSections({ blocks }).outstandingContext).toEqual([]);
   });
 });
 
@@ -246,7 +298,9 @@ describe("extractOutstandingContext — retry-success extinguishes errors", () =
       err("edit", `Could not update ${errorPath}`),
       ok("edit", successText),
     ];
-    expect(buildSections({ blocks }).outstandingContext.length).toBe(count);
+    const r = buildSections({ blocks });
+    expect(r.outstandingContext).toHaveLength(count);
+    if (count > 0) expect(r.outstandingContext[0]).toBe(`[edit] Could not update ${errorPath}`);
   });
 
   it("keeps an edit error when only a different file is later edited", () => {
