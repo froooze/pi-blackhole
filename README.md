@@ -46,12 +46,13 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## ✨ What's new
 
-> **Latest release: [0.5.10](CHANGELOG.md)**
+> **Latest release: [0.5.11](CHANGELOG.md)**
 >
-> - **Memory workers that fail now fall back instead of silently skipping** — observer/reflector/dropper stream errors and turn-cap cutoffs throw into the model fallback chain, so a failed run no longer advances the cursor over work it never finished.
-> - **The turn cap only ends runs that did tool work** — a run that stops naturally on exactly its last allowed turn keeps its result instead of failing as cap-cut, and a capped session model is not retried on an identical budget.
-> - **`/blackhole` on an ineligible branch reports nothing-to-compact** — instead of Pi's error card plus a second failure toast when the branch already fits inside the keep-recent budget.
-> - **A cancelled `/blackhole` stays quiet, and the command loads the config first** — no second vaguer toast on cancel, and a `manual`-mode session flushes pending memory instead of reading defaults.
+> - **Oversized memory work shrinks to fit instead of stalling** — when no configured model holds the sized input, the stages re-plan against the largest window and run, so small-context models work instead of silently never running.
+> - **The observer can no longer skip entries it never saw** — the chunk cap keeps the oldest prefix and drains the backlog in-run, so coverage never advances past content the model wasn't shown.
+> - **Cut-off worker runs fail into fallback instead of counting as finished** — `length`/`aborted`/stray tool-use endings no longer mark uncovered work done.
+> - **Compaction no longer freezes on long encoded tool output** — bounded path scanning keeps multi-megabyte tool results cheap.
+> - **A warning when `observeAfterTokens` exceeds `observerChunkMaxTokens`** — the loader warns (never clamps) that every pass will run as multiple batches.
 >
 > See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 

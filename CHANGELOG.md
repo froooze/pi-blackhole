@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [0.5.11] - 2026-10-05
+
 ### Added
 
 - **Oversized work shrinks to fit instead of stalling.** When no configured model can hold the sized input, the stage re-plans against the largest resolved window and runs that: the observer caps its chunk and drains the remainder in-run, the reflector splits new items into batches that all complete before the single cursor advance, and the dropper evaluates batches under pool-wide pressure and applies the ranker + cap once. A failed batch still voids its run with the cursor unmoved.
