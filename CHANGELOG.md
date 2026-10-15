@@ -2,6 +2,36 @@
 
 ---
 
+## [0.5.13] - 2026-10-13
+
+### Changed
+
+- Thinking-only worker models: observerModel/reflectorModel/dropperModel (and model) now accept { "thinking": "<level>" } without provider/id as a pure thinking-level modifier while the worker tracks the session model via sessionFallback (#153).
+
+### Fixed
+
+- **Observer turn-cap keeps partial work instead of cooling the model.** A capped run returns its recorded observations with a cited-prefix checkpoint; the stage commits that prefix, drains the rest in-run, and skips the model in-cycle only. Coverage never advances past a citation. A capped batch with no head-anchored prefix is halved and retried (converging to a single entry) instead of discarded, still with no cooldown.
+- **Observer turn-cap keeps prefix-less facts as unanchored instead of discarding them.** A capped run whose citations form no head-anchored prefix returns the batch as `unanchoredObservations`; the stage stores it under the coverage-inert `om.observations.unanchored` key (pool, preamble, and reflector/dropper inputs read it; no cursor or coverage scan does), then halves and retries as before. Manual mode buffers them in pending `unanchoredBatches`, flushed by `/blackhole` under the same key.
+- **Resolve-time notices emit once per run with an end-of-run summary.** Per-stage dedupe (capped at five entries), headless-safe, and the checkpoint toast is no longer gated away.
+- **The debug log no longer records one line per foreign custom entry.** `foldLedger` skipped third-party session entries (e.g. `pi-cache-turn`) correctly but emitted a `fold.unknown_custom_type` line for each, burying real debug output; unknown custom types are now reported as a single deduplicated `fold.unknown_custom_types` line with per-type counts per fold.
+
+---
+
+## [0.5.12] - 2026-10-08
+
+### Changed
+
+- **Pi 1.x is supported.** The declared peer range for all four `@earendil-works/pi-*` packages widens from `>=0.85.1 <1.0.0` to `>=0.85.1 <2.0.0`, and the dev toolchain moves to `1.1.0`, so Pi 1.0/1.1 installs no longer report an out-of-range peer ([#151](https://github.com/k0valik/pi-blackhole/issues/151)). The extension-API test double picks up the required members Pi 1.1 added (`registerToolRenderer`, `getSettings`, the MCP registrations, and the virtual-model registrations).
+- **Toolchain: pnpm 12.10.0.** `packageManager` moves from 11.27.1 to 12.10.0; the lockfile now records pnpm's self-managed package-manager dependencies.
+- **Dev-dependency refresh.** The dev-dependencies group is bumped (lint-staged `17.6.0`, oxfmt `0.71.0`, oxlint `1.86.0`, vitest `5.0.3`) ([#145](https://github.com/k0valik/pi-blackhole/pull/145)).
+
+### Fixed
+
+- **CI installs accept the freshly published Pi 1.1.0 set.** The `@earendil-works/pi-*` bump to `1.1.0` crossed pnpm's minimum-release-age gate, so `pnpm install --frozen-lockfile` failed in CI and the publish job; the 1.1.0 packages are now listed in `minimumReleaseAgeExclude`, matching the earlier `0.87.0` exemption ([#151](https://github.com/k0valik/pi-blackhole/issues/151)).
+- **Mid-run inline compaction no longer looks like a manual `/compact` to RPC/SDK clients.** Pi's `AgentSession.compact()` hardcodes `reason: "manual"` on `compaction_start`/`compaction_end` (and on compaction-source summarization retries), which RPC frontends read as "the user compacted between runs" — so during an inline compaction they closed the still-open turn and dropped every later event of the run. The adapter now rewrites the label to `"threshold"` for the duration of the inline attempt (a run is always open at an awaited `turn_end`), while a genuine `/compact`/`/blackhole` between runs stays `"manual"` ([#150](https://github.com/k0valik/pi-blackhole/issues/150)).
+
+---
+
 ## [0.5.11] - 2026-10-05
 
 ### Added
