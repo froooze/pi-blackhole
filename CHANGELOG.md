@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- **Extension loads on omp again.** 0.5.14 built the reflector's supersedes schema by reading `.properties` back from the base schema at import time. Hosts that shim `typebox` with callable schemas (oh-my-pi's omptype) have no `.properties`, so the extension failed to load and `omp plugin install` rejected it, even with `reflectionSupersedes` off. Both reflector schemas now compose from shared field definitions, and the schema pi sends is unchanged ([#174](https://github.com/k0valik/pi-blackhole/issues/174)).
+
 ---
 
 ## [0.5.15] - 2026-10-18
