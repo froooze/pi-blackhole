@@ -7,7 +7,12 @@
  * `showPreCompactionMessage: false`.
  */
 import { describe, expect, it, vi } from "vitest";
-import { initTheme, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
+import {
+  initTheme,
+  sessionEntryToContextMessages,
+  SessionManager,
+  type CompactionEntry,
+} from "@earendil-works/pi-coding-agent";
 import {
   PRE_COMPACTION_MAX_BYTES,
   PRE_COMPACTION_OUTPUT_TYPE,
@@ -119,11 +124,11 @@ describe("truncateToBytes", () => {
 
 describe("selectOmittedAssistantText", () => {
   const branch: Entry[] = [
-    compactionEntry("c1"),
-    assistantMessage("a2", [textBlock("newest answer")]),
-    userMessage("u2", "second question"),
-    assistantMessage("a1", [textBlock("older answer")]),
     userMessage("u1", "first question"),
+    assistantMessage("a1", [textBlock("older answer")]),
+    userMessage("u2", "second question"),
+    assistantMessage("a2", [textBlock("newest answer")]),
+    compactionEntry("c1"),
   ];
 
   it("returns the newest omitted assistant text", () => {
@@ -152,9 +157,9 @@ describe("selectOmittedAssistantText", () => {
 
   it("skips aborted assistant messages", () => {
     const aborted: Entry[] = [
-      compactionEntry("c1"),
-      assistantMessage("a2", [textBlock("partial output")], "aborted"),
       assistantMessage("a1", [textBlock("complete output")]),
+      assistantMessage("a2", [textBlock("partial output")], "aborted"),
+      compactionEntry("c1"),
     ];
     expect(
       selectOmittedAssistantText({
@@ -167,10 +172,10 @@ describe("selectOmittedAssistantText", () => {
 
   it("skips non-assistant and text-less entries", () => {
     const mixed: Entry[] = [
-      compactionEntry("c1"),
-      { type: "custom", id: "x1", customType: "other", data: {} },
-      assistantMessage("a2", [{ type: "toolCall", name: "bash" }]),
       assistantMessage("a1", [textBlock("real output")]),
+      assistantMessage("a2", [{ type: "toolCall", name: "bash" }]),
+      { type: "custom", id: "x1", customType: "other", data: {} },
+      compactionEntry("c1"),
     ];
     expect(
       selectOmittedAssistantText({
@@ -183,9 +188,9 @@ describe("selectOmittedAssistantText", () => {
 
   it("skips message entries whose message is not an object", () => {
     const malformed: Entry[] = [
-      compactionEntry("c1"),
-      { type: "message", id: "bad", message: null },
       assistantMessage("a1", [textBlock("real output")]),
+      { type: "message", id: "bad", message: null },
+      compactionEntry("c1"),
     ];
     expect(
       selectOmittedAssistantText({
@@ -212,8 +217,8 @@ describe("selectOmittedAssistantText", () => {
 describe("buildPreCompactionOutputData", () => {
   it("records source and compaction ids with the copied text", () => {
     const branch: Entry[] = [
-      compactionEntry("c1"),
       assistantMessage("a2", [textBlock("dropped answer")]),
+      compactionEntry("c1"),
     ];
     expect(
       buildPreCompactionOutputData({
@@ -231,8 +236,8 @@ describe("buildPreCompactionOutputData", () => {
 
   it("marks the copy truncated when the source exceeds the byte cap", () => {
     const branch: Entry[] = [
-      compactionEntry("c1"),
       assistantMessage("a2", [textBlock("x".repeat(PRE_COMPACTION_MAX_BYTES + 1))]),
+      compactionEntry("c1"),
     ];
     const data = buildPreCompactionOutputData({
       branch,
@@ -247,8 +252,8 @@ describe("buildPreCompactionOutputData", () => {
 
   it("stores no terminal escape sequences from the source text", () => {
     const branch: Entry[] = [
-      compactionEntry("c1"),
       assistantMessage("a2", [textBlock("before\u001b[31mred\u001b[0m after")]),
+      compactionEntry("c1"),
     ];
     const data = buildPreCompactionOutputData({
       branch,
@@ -260,7 +265,7 @@ describe("buildPreCompactionOutputData", () => {
   });
 
   it("returns undefined when no assistant text was dropped", () => {
-    const branch: Entry[] = [compactionEntry("c1"), assistantMessage("a2", [textBlock("kept")])];
+    const branch: Entry[] = [assistantMessage("a2", [textBlock("kept")]), compactionEntry("c1")];
     expect(
       buildPreCompactionOutputData({
         branch,
@@ -332,12 +337,16 @@ interface HarnessOptions {
   details?: unknown;
   branch?: Entry[];
   contextEntries?: Entry[];
+  sessionManager?: SessionManager;
+  compaction?: CompactionEntry;
 }
 
 function makeHarness(options: HarnessOptions = {}) {
   let handler: ((event: unknown, ctx: unknown) => void) | undefined;
   let renderer: ((entry: unknown, opts: unknown, theme: unknown) => unknown) | undefined;
-  const appendEntry = vi.fn();
+  const appendEntry = vi.fn((customType: string, data: unknown) =>
+    options.sessionManager?.appendCustomEntry(customType, data),
+  );
   const pi = {
     on: vi.fn((name: string, cb: any) => {
       if (name === "session_compact") handler = cb;
@@ -356,14 +365,14 @@ function makeHarness(options: HarnessOptions = {}) {
   };
 
   const branch = options.branch ?? [
-    compactionEntry("c1"),
-    assistantMessage("a2", [textBlock("dropped answer")]),
     userMessage("u1", "question"),
+    assistantMessage("a2", [textBlock("dropped answer")]),
+    compactionEntry("c1"),
   ];
   const contextEntries = options.contextEntries ?? branch.filter((entry) => entry.id === "c1");
   const ctx = {
     cwd: "/tmp/project",
-    sessionManager: {
+    sessionManager: options.sessionManager ?? {
       getBranch: () => branch,
       buildContextEntries: () => contextEntries,
     },
@@ -377,7 +386,7 @@ function makeHarness(options: HarnessOptions = {}) {
       handler?.(
         {
           type: "session_compact",
-          compactionEntry: {
+          compactionEntry: options.compaction ?? {
             id: "c1",
             details: options.details ?? { compactor: "blackhole", version: 1 },
           },
@@ -419,7 +428,7 @@ describe("registerPreCompactionOutput", () => {
 
   it("appends nothing when the dropped text is empty", () => {
     const harness = makeHarness({
-      branch: [compactionEntry("c1"), userMessage("u1", "question")],
+      branch: [userMessage("u1", "question"), compactionEntry("c1")],
     });
     harness.invoke();
     expect(harness.appendEntry).not.toHaveBeenCalled();
@@ -445,9 +454,9 @@ describe("registerPreCompactionOutput", () => {
     };
     const harness = makeHarness({
       branch: [
-        { type: "custom", id: "x1", customType: PRE_COMPACTION_OUTPUT_TYPE, data },
-        compactionEntry("c1"),
         assistantMessage("a2", [textBlock("dropped answer")]),
+        compactionEntry("c1"),
+        { type: "custom", id: "x1", customType: PRE_COMPACTION_OUTPUT_TYPE, data },
       ],
     });
     harness.invoke();
@@ -460,6 +469,226 @@ describe("registerPreCompactionOutput", () => {
       throw new Error("disk full");
     });
     expect(() => harness.invoke()).not.toThrow();
+  });
+});
+
+// ── native Pi session contract ───────────────────────────────────────────────
+
+function appendNativeAssistant(sessionManager: SessionManager, text: string): string {
+  return sessionManager.appendMessage({
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "openai-responses",
+    provider: "openai",
+    model: "test-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 0,
+  });
+}
+
+function appendNativeCompaction(
+  sessionManager: SessionManager,
+  firstKeptEntryId: string | null = null,
+): CompactionEntry {
+  const id = sessionManager.appendCompaction(
+    "summary",
+    firstKeptEntryId,
+    100,
+    { compactor: "blackhole", version: 1 },
+    true,
+  );
+  const entry = sessionManager.getEntry(id);
+  if (entry?.type !== "compaction") throw new Error("Expected native compaction entry");
+  return entry;
+}
+
+function nativeOutputCopies(sessionManager: SessionManager): unknown[] {
+  return sessionManager
+    .getBranch()
+    .flatMap((entry) =>
+      entry.type === "custom" && entry.customType === PRE_COMPACTION_OUTPUT_TYPE
+        ? [entry.data]
+        : [],
+    );
+}
+
+function makeNativeScanSession(distance: number) {
+  const sessionManager = SessionManager.inMemory();
+  const sourceEntryId = appendNativeAssistant(sessionManager, "scan boundary answer");
+  for (let i = 1; i < distance; i++) {
+    sessionManager.appendCustomEntry("scan-padding", {});
+  }
+  const compaction = appendNativeCompaction(sessionManager);
+  return { sessionManager, sourceEntryId, compaction };
+}
+
+describe("session_compact with native Pi SessionManager", () => {
+  it("restores the newest omitted assistant output from the real session path", () => {
+    const sessionManager = SessionManager.inMemory();
+    sessionManager.appendMessage({ role: "user", content: "question", timestamp: 0 });
+    appendNativeAssistant(sessionManager, "older answer");
+    const sourceEntryId = appendNativeAssistant(sessionManager, "Approve the latest plan?");
+    const compaction = appendNativeCompaction(sessionManager);
+    const harness = makeHarness({ sessionManager, compaction });
+
+    harness.invoke();
+
+    expect(nativeOutputCopies(sessionManager)).toEqual([
+      {
+        text: "Approve the latest plan?",
+        sourceEntryId,
+        compactionEntryId: compaction.id,
+        truncated: false,
+      },
+    ]);
+  });
+
+  it("skips the retained assistant tail using real context entries", () => {
+    const sessionManager = SessionManager.inMemory();
+    sessionManager.appendMessage({ role: "user", content: "first question", timestamp: 0 });
+    const sourceEntryId = appendNativeAssistant(sessionManager, "omitted answer");
+    const firstKeptEntryId = sessionManager.appendMessage({
+      role: "user",
+      content: "second question",
+      timestamp: 0,
+    });
+    appendNativeAssistant(sessionManager, "retained answer");
+    const compaction = appendNativeCompaction(sessionManager, firstKeptEntryId);
+    const harness = makeHarness({ sessionManager, compaction });
+
+    harness.invoke();
+
+    expect(nativeOutputCopies(sessionManager)).toEqual([
+      {
+        text: "omitted answer",
+        sourceEntryId,
+        compactionEntryId: compaction.id,
+        truncated: false,
+      },
+    ]);
+  });
+
+  it("restores pre-compaction output even when later output exists", () => {
+    const sessionManager = SessionManager.inMemory();
+    const sourceEntryId = appendNativeAssistant(sessionManager, "before compaction");
+    const compaction = appendNativeCompaction(sessionManager);
+    appendNativeAssistant(sessionManager, "after compaction");
+    const harness = makeHarness({ sessionManager, compaction });
+
+    harness.invoke();
+
+    expect(nativeOutputCopies(sessionManager)).toEqual([
+      {
+        text: "before compaction",
+        sourceEntryId,
+        compactionEntryId: compaction.id,
+        truncated: false,
+      },
+    ]);
+  });
+});
+
+describe("omitted output scan boundaries with native Pi entries", () => {
+  it("includes the entry exactly maxScan entries before the compaction", () => {
+    const { sessionManager, sourceEntryId, compaction } = makeNativeScanSession(3);
+    expect(
+      selectOmittedAssistantText({
+        branch: sessionManager.getBranch(),
+        retainedIds: new Set([compaction.id]),
+        compactionEntryId: compaction.id,
+        maxScan: 3,
+      }),
+    ).toEqual({ entryId: sourceEntryId, text: "scan boundary answer" });
+  });
+
+  it("excludes the entry one beyond maxScan", () => {
+    const { sessionManager, compaction } = makeNativeScanSession(4);
+    expect(
+      selectOmittedAssistantText({
+        branch: sessionManager.getBranch(),
+        retainedIds: new Set([compaction.id]),
+        compactionEntryId: compaction.id,
+        maxScan: 3,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("includes the 600th entry with the default scan budget", () => {
+    const { sessionManager, sourceEntryId, compaction } = makeNativeScanSession(600);
+    const harness = makeHarness({ sessionManager, compaction });
+    harness.invoke();
+    expect(nativeOutputCopies(sessionManager)).toEqual([
+      {
+        text: "scan boundary answer",
+        sourceEntryId,
+        compactionEntryId: compaction.id,
+        truncated: false,
+      },
+    ]);
+  });
+
+  it("excludes the 601st entry with the default scan budget", () => {
+    const { sessionManager, compaction } = makeNativeScanSession(601);
+    const harness = makeHarness({ sessionManager, compaction });
+    harness.invoke();
+    expect(nativeOutputCopies(sessionManager)).toEqual([]);
+  });
+
+  it("selects nothing with a zero scan budget", () => {
+    const { sessionManager, compaction } = makeNativeScanSession(1);
+    expect(
+      selectOmittedAssistantText({
+        branch: sessionManager.getBranch(),
+        retainedIds: new Set([compaction.id]),
+        compactionEntryId: compaction.id,
+        maxScan: 0,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("does not select output after a compaction even if it is not in retainedIds", () => {
+    const { sessionManager, sourceEntryId, compaction } = makeNativeScanSession(1);
+    appendNativeAssistant(sessionManager, "later output must not be copied");
+    expect(
+      selectOmittedAssistantText({
+        branch: sessionManager.getBranch(),
+        retainedIds: new Set([compaction.id]),
+        compactionEntryId: compaction.id,
+      }),
+    ).toEqual({ entryId: sourceEntryId, text: "scan boundary answer" });
+  });
+
+  it("selects nothing when the compaction anchor is at index zero", () => {
+    const sessionManager = SessionManager.inMemory();
+    const compaction = appendNativeCompaction(sessionManager);
+    appendNativeAssistant(sessionManager, "later output must not be copied");
+    expect(
+      selectOmittedAssistantText({
+        branch: sessionManager.getBranch(),
+        retainedIds: new Set([compaction.id]),
+        compactionEntryId: compaction.id,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("selects nothing when a missing anchor has assistant candidates", () => {
+    const sessionManager = SessionManager.inMemory();
+    appendNativeAssistant(sessionManager, "unanchored output");
+    expect(
+      selectOmittedAssistantText({
+        branch: sessionManager.getBranch(),
+        retainedIds: new Set(),
+        compactionEntryId: "missing",
+      }),
+    ).toBeUndefined();
   });
 });
 

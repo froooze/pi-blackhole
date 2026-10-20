@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- **The last assistant output stays visible after compaction.** Compaction truncates prior conversation from view, which could also hide the last answer or approval question. The display-only copy is now restored; model context and retention are unchanged.
+
 ---
 
 ## [0.5.15] - 2026-10-18

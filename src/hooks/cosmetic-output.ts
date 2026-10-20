@@ -110,7 +110,7 @@ export function truncateToBytes(
  * retained is the copy candidate; `undefined` means nothing worth copying.
  */
 export function selectOmittedAssistantText(opts: {
-  /** Session path, newest first (host `getBranch()`). */
+  /** Session path, oldest first (host `getBranch()`). */
   branch: readonly SessionEntry[];
   /** Entry ids that remain in provider context (host `buildContextEntries()`). */
   retainedIds: ReadonlySet<string>;
@@ -122,8 +122,8 @@ export function selectOmittedAssistantText(opts: {
   const maxScan = opts.maxScan ?? MAX_SCAN_ENTRIES;
   const start = branch.findIndex((entry) => entry?.id === compactionEntryId);
   if (start < 0) return undefined;
-  const limit = Math.min(branch.length, start + 1 + maxScan);
-  for (let i = start + 1; i < limit; i++) {
+  const first = Math.max(0, start - maxScan);
+  for (let i = start - 1; i >= first; i--) {
     const entry = branch[i];
     if (!entry?.id || retainedIds.has(entry.id)) continue;
     if (entry.type !== "message") continue;
