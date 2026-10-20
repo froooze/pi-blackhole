@@ -29,6 +29,8 @@ function jsonOf(schema: unknown): Json {
   throw new Error("not a callable shim schema");
 }
 
+// Models omp's callable shape only, not TypeBox output: no `~kind`/`~optional` markers, and an
+// empty `required` is kept. The golden schema test in reflector.test.ts pins real typebox output.
 const shimType = {
   Object: (fields: Record<string, unknown>) =>
     callable({
