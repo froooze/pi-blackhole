@@ -94,7 +94,16 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   let lastMemoryOn = true;
 
   function theme(): ThemeShim {
-    return ui?.theme ?? EMPTY_THEME;
+    try {
+      const t = ui?.theme;
+      // SDK/UI bridges may expose Pi's truthy theme proxy before initTheme().
+      // Resolve fg inside the guard: merely reading ui.theme does not probe it.
+      // Bind the receiver and retry each render so later theme changes work.
+      return t ? { fg: t.fg.bind(t) } : EMPTY_THEME;
+    } catch {
+      // Optional footer colors must not take down a background agent's timer.
+      return EMPTY_THEME;
+    }
   }
 
   // ── rendering ──────────────────────────────────────────────────────────────

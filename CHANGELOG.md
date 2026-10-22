@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- **Background agents survive an uninitialized status-bar theme.** A host UI bridge could expose a theme before it was ready, causing Blackhole's footer updates to throw `Theme not initialized. Call initTheme() first.` and terminate the worker from a timer. Status updates now fall back to plain text when the theme is unavailable and resume using colors once it is ready.
+
 ---
 
 ## [0.5.15] - 2026-10-18

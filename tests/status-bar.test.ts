@@ -147,7 +147,122 @@ describe("status bar", () => {
     vi.useFakeTimers();
   });
   afterEach(() => {
+    vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  describe("uninitialized theme", () => {
+    // Pi exposes a truthy theme proxy even before initTheme() has run. Its
+    // property getter, not ctx.ui.theme itself, throws in a headless worker.
+    function unavailableTheme() {
+      return new Proxy(
+        { fg: (_style: string, text: string) => text },
+        {
+          get() {
+            throw new Error("Theme not initialized. Call initTheme() first.");
+          },
+        },
+      );
+    }
+
+    it("renders plain status when a UI bridge exposes an uninitialized theme", async () => {
+      const h = setup();
+      const ctx = {
+        ...h.ctx,
+        hasUI: true,
+        ui: { setStatus: h.setStatus, theme: unavailableTheme() },
+      };
+      await h.fire("session_start", {}, ctx);
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("does not throw from the idle timer when the theme becomes unavailable", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: { fg: (_style: string, text: string) => text },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      ui.theme = unavailableTheme();
+      expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+    });
+  });
+
+  describe("theme availability", () => {
+    it("renders plain status when the theme getter throws", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          throw new Error("Theme not initialized. Call initTheme() first.");
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("renders plain status when no theme is provided", async () => {
+      const h = setup();
+      await h.fire("session_start", {}, { ...h.ctx, ui: { setStatus: h.setStatus } });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("preserves the theme method receiver", async () => {
+      const h = setup();
+      const theme = {
+        prefix: "themed",
+        fg(style: string, text: string) {
+          return `${this.prefix}:${style}:${text}`;
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, ui: { setStatus: h.setStatus, theme } });
+      expect(h.lastStatus()).toContain("themed:success:bh");
+    });
+
+    it("picks up a theme initialized after session_start without a ledger change", async () => {
+      const h = setup();
+      let ready = false;
+      const theme = { fg: (style: string, text: string) => `${style}:${text}` };
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return theme;
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      ready = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.lastStatus()).toContain("success:bh");
+    });
+
+    it.each(["spinner", "settle"])("keeps the %s timer safe without a theme", async (timer) => {
+      const h = setup();
+      let ready = true;
+      const theme = { fg: (_style: string, text: string) => text };
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return theme;
+        },
+      };
+      const ctx = { ...h.ctx, hasUI: true, ui };
+      await h.fire("session_start", {}, ctx);
+      if (timer === "spinner") {
+        h.runtime.consolidationInFlight = true;
+        h.runtime.consolidationPhase = "observer";
+        await h.fire("agent_start", {}, ctx);
+        expect(h.lastStatus()).toContain("[observer]");
+      } else {
+        await h.fire("session_compact", { reason: "manual" }, ctx);
+        expect(h.lastStatus()).toContain("[compact]");
+      }
+      ready = false;
+      expect(() => vi.advanceTimersByTime(timer === "spinner" ? 80 : 5_000)).not.toThrow();
+      if (timer === "spinner") expect(h.lastStatus()).toContain("⠙ [observer]");
+      else expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
   });
 
   describe("gauges", () => {
