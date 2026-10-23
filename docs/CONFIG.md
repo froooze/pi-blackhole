@@ -46,6 +46,7 @@ The config file must contain **valid JSON**. A trailing comma, partial write, or
 
   // ── Observational Memory ──
   "memory": true,                 // Enable OM workers + content injection
+  "subagentMemory": "off",        // "off" = no OM in detected subagents, "inherit" = follow memory
   "sessionFallback": true,        // Fall back to session model when OM models fail
   "reflectionTimestamps": true,  // Show reflection evidence time
   "reflectionSupersedes": false, // Replacement notes; replaced reflections leave compaction output
@@ -400,6 +401,24 @@ Controls whether observational memory workers run and whether OM content is inje
 { "memory": false, "compaction": "auto", "compactionEngine": "blackhole" }
 ```
 
+### `subagentMemory`
+
+Controls observational memory in sessions detected as subagents. Compaction is unaffected: children keep whatever `compactionEngine` their config resolves to.
+
+| Value | Behavior |
+|-------|----------|
+| `"off"` | No OM workers and no OM injection in detected children (default) |
+| `"inherit"` | Children follow the same `memory` value as the main session |
+
+Detection is centralized in `src/core/subagent-detector.ts`: runner env markers (`PI_SUBAGENT_*`, `GENTLE_PI_AGENTS_*`), runner-owned session paths/custom entries, in-memory `fork`, and a generic ancestry marker (`PI_BLACKHOLE_ROOT_SESSIONS`) that every main session registers for its children. Unknown sessions are treated as main. `/resume` is ambiguous: a resumed session is treated as main unless a positive child signal is present. The ancestry registry is pruned at session shutdown (reload excepted) so a later main session in the same host is not mistaken for a child. For an unsupported runner, list extra env names in `PI_BLACKHOLE_SUBAGENT_MARKERS` (comma-separated).
+
+Precedence: `memory: false` still disables OM everywhere. Under `"off"`, a detected child stays off even if an inherited `PI_BLACKHOLE_MEMORY=true` resolved `memory` to true; to opt one child back in, set `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit` (or the config value) for that child. Set `PI_BLACKHOLE_SUBAGENT_MEMORY=off` to force the default when the file says `inherit`.
+
+```jsonc
+{ "subagentMemory": "off" }      // default: no OM in subagents
+{ "subagentMemory": "inherit" }  // run OM in subagents too
+```
+
 ### `sessionFallback`
 
 Defaults to `true`: when all OM model candidates are exhausted, the stage falls back to the main coding (session) model as a last resort instead of being skipped. Set to `false` to skip the stage entirely instead — recommended once cheap worker models are configured, since worker runs on the session model add cost and bust its prompt cache.
@@ -725,6 +744,18 @@ Boolean fields:
 | `PI_BLACKHOLE_FULL_FOLD_ALWAYS` | `fullFoldAlways` |
 | `PI_BLACKHOLE_STATUSBAR` | `statusBar` |
 | `PI_BLACKHOLE_SHOW_WORKER_NOTIFICATIONS` | `showWorkerNotifications` |
+
+Enum fields (case-insensitive; invalid values fall back):
+
+| Variable | Overrides |
+|----------|-----------|
+| `PI_BLACKHOLE_SUBAGENT_MEMORY` | `subagentMemory` (`off` \| `inherit`) |
+
+Subagent detection helper:
+
+| Variable | Effect |
+|----------|--------|
+| `PI_BLACKHOLE_SUBAGENT_MARKERS` | Comma-separated extra env var names; a truthy value marks the session as a subagent |
 
 Integer fields (invalid values fall back; `reflectionsPoolMaxTokens` also accepts `0` to disable its cap):
 

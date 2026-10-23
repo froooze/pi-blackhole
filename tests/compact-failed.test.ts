@@ -57,6 +57,8 @@ function captureHandler(
   const controller = args.compactInFlight ? new AbortController() : null;
   const runtime = {
     ensureConfig: vi.fn(),
+    isMemoryEnabled: () => true,
+    noteSubagentMemorySkip: vi.fn(),
     config: {
       compactionEngine: args.compactionEngine ?? "blackhole",
       debugLog: false,
@@ -314,6 +316,8 @@ describe("compact-failed attribution × before-compact hook", () => {
     };
     const runtime = {
       ensureConfig: vi.fn(),
+      isMemoryEnabled: () => true,
+      noteSubagentMemorySkip: vi.fn(),
       config: {
         compaction: "auto",
         compactionEngine: "blackhole",
@@ -494,6 +498,8 @@ describe("compact-failed × pending auto-compaction", () => {
     };
     const runtime = {
       ensureConfig: vi.fn(),
+      isMemoryEnabled: () => true,
+      noteSubagentMemorySkip: vi.fn(),
       config: {
         compaction: "auto",
         compactionEngine: "blackhole",
