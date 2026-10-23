@@ -648,7 +648,7 @@ A thinking-only entry (`{ "thinking": "low" }`, no `provider`/`id`) is never tri
 
 ### `statusBar`
 
-Show the footer status bar: three token gauges — O (transcript since last observer run), P (observation pool fill), X (context since last compaction) — plus worker spinners and `✓ +N` completion events. O and P render only while [`memory`](#memory) is `true`: with observational memory disabled the pipeline hard-returns before any observer runs, so a filling gauge would imply a note-taking pass that is never due. The gauges return on the next render after `/blackhole om-on` re-enables memory.
+Show the footer status bar: three token gauges — O (transcript since last observer run), P (observation pool fill), X (context since last compaction) — plus worker spinners and `✓ +N` completion events. O and P render only while [`memory`](#memory) is `true`: with observational memory disabled the pipeline hard-returns before any observer runs, so a filling gauge would imply a note-taking pass that is never due. The gauges return on the next render after `/blackhole om-on` re-enables memory. If the host theme cannot be read or throws while formatting, the footer falls back to plain text for that render and colors resume on the next render that succeeds; Blackhole does not initialize or replace the host theme.
 
 | Type | Default |
 |------|---------|

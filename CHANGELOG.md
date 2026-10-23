@@ -4,6 +4,7 @@
 
 - **Extension loads on omp again.** 0.5.14 built the reflector's supersedes schema by reading `.properties` back from the base schema at import time. Hosts that shim `typebox` with callable schemas (oh-my-pi's omptype) have no `.properties`, so the extension failed to load and `omp plugin install` rejected it, even with `reflectionSupersedes` off; this second failure was reported in [#174](https://github.com/k0valik/pi-blackhole/issues/174). Both reflector schemas now compose from shared field definitions, and the schema pi sends is unchanged.
 - **`showPreCompactionMessage` works again after compaction.** The handler scanned the session path in the wrong direction, so the display-only copy was never appended and the last answer or approval question disappeared with the truncated history. It now finds the newest dropped assistant text; model context and retention are unchanged.
+- **Background agents survive an uninitialized status-bar theme.** A host UI bridge could expose a theme before it was ready, or one whose `fg` throws only when called, causing Blackhole's footer updates to throw `Theme not initialized. Call initTheme() first.` and terminate the worker from a timer. A render that cannot use the theme now falls back to plain text (recording the failure when `debugLog` is on) and resumes colors on the next render that succeeds.
 
 ---
 
