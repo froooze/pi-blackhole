@@ -51,11 +51,30 @@ const shimType = {
 };
 
 // Dynamic import: the typebox mock must be registered before the schema modules evaluate.
-async function loadReflectorSchemasUnderShim(): Promise<typeof ReflectorToolSchema> {
-  vi.doMock("typebox", () => ({ Type: shimType }));
+async function loadReflectorSchemasUnderShim(
+  type: typeof shimType = shimType,
+): Promise<typeof ReflectorToolSchema> {
+  vi.doMock("typebox", () => ({ Type: type }));
   vi.resetModules();
   return await import("../src/om/agents/reflector/tool-schema.js");
 }
+
+// Hosts may expose `.properties` as a non-enumerable accessor instead of
+// omitting it. The module must never touch it, so make any read fatal: the
+// pre-fix formulation threw here, and the fix must keep it unreachable.
+const shimTypeWithReadGuard: typeof shimType = {
+  ...shimType,
+  Object: (fields: Record<string, unknown>) => {
+    const schema = shimType.Object(fields);
+    Object.defineProperty(schema, "properties", {
+      configurable: true,
+      get() {
+        throw new Error("host shim .properties must not be read");
+      },
+    });
+    return schema;
+  },
+};
 
 afterEach(() => {
   vi.doUnmock("typebox");
@@ -67,6 +86,10 @@ describe("typebox shim with callable schemas and no .properties", () => {
     vi.doMock("typebox", () => ({ Type: shimType }));
     vi.resetModules();
     await expect(import("../src/om/prompt-budget.js")).resolves.toBeDefined();
+  });
+
+  test("never reads .properties, even when the shim exposes it as a throwing getter", async () => {
+    await expect(loadReflectorSchemasUnderShim(shimTypeWithReadGuard)).resolves.toBeDefined();
   });
 
   test("supersedes schema adds an array-typed supersedes to the reflection item", async () => {
