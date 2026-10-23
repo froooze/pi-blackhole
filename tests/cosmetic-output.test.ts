@@ -474,7 +474,11 @@ describe("registerPreCompactionOutput", () => {
 
 // ── native Pi session contract ───────────────────────────────────────────────
 
-function appendNativeAssistant(sessionManager: SessionManager, text: string): string {
+function appendNativeAssistant(
+  sessionManager: SessionManager,
+  text: string,
+  stopReason: "stop" | "aborted" = "stop",
+): string {
   return sessionManager.appendMessage({
     role: "assistant",
     content: [{ type: "text", text }],
@@ -489,7 +493,18 @@ function appendNativeAssistant(sessionManager: SessionManager, text: string): st
       totalTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
-    stopReason: "stop",
+    stopReason,
+    timestamp: 0,
+  });
+}
+
+function appendNativeToolResult(sessionManager: SessionManager, toolCallId: string): string {
+  return sessionManager.appendMessage({
+    role: "toolResult",
+    toolCallId,
+    toolName: "bash",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
     timestamp: 0,
   });
 }
@@ -689,6 +704,176 @@ describe("omitted output scan boundaries with native Pi entries", () => {
         compactionEntryId: "missing",
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("omitted output across repeated compactions", () => {
+  const selectFrom = (sessionManager: SessionManager, compactionEntryId: string) =>
+    selectOmittedAssistantText({
+      branch: sessionManager.getBranch(),
+      retainedIds: new Set(sessionManager.buildContextEntries().map((entry) => entry.id)),
+      compactionEntryId,
+    });
+
+  it("selects the newest answer after a previous compaction", () => {
+    const sessionManager = SessionManager.inMemory();
+    appendNativeAssistant(sessionManager, "answer summarized by the first compaction");
+    appendNativeCompaction(sessionManager);
+    sessionManager.appendMessage({ role: "user", content: "second question", timestamp: 0 });
+    const sourceEntryId = appendNativeAssistant(sessionManager, "newest dropped answer");
+    const firstKeptEntryId = sessionManager.appendMessage({
+      role: "user",
+      content: "third question",
+      timestamp: 0,
+    });
+    appendNativeAssistant(sessionManager, "retained answer");
+    appendNativeToolResult(sessionManager, "call-1");
+    const compaction = appendNativeCompaction(sessionManager, firstKeptEntryId);
+
+    expect(selectFrom(sessionManager, compaction.id)).toEqual({
+      entryId: sourceEntryId,
+      text: "newest dropped answer",
+    });
+  });
+
+  it("skips several retained messages in the tail", () => {
+    const sessionManager = SessionManager.inMemory();
+    const sourceEntryId = appendNativeAssistant(sessionManager, "omitted answer");
+    const firstKeptEntryId = sessionManager.appendMessage({
+      role: "user",
+      content: "second question",
+      timestamp: 0,
+    });
+    appendNativeAssistant(sessionManager, "retained text answer");
+    appendNativeToolResult(sessionManager, "call-1");
+    sessionManager.appendMessage({ role: "user", content: "third question", timestamp: 0 });
+    appendNativeAssistant(sessionManager, "newest retained answer");
+    const compaction = appendNativeCompaction(sessionManager, firstKeptEntryId);
+
+    expect(selectFrom(sessionManager, compaction.id)).toEqual({
+      entryId: sourceEntryId,
+      text: "omitted answer",
+    });
+  });
+
+  it("selects text the previous compaction left visible", () => {
+    const sessionManager = SessionManager.inMemory();
+    const firstKeptEntryId = sessionManager.appendMessage({
+      role: "user",
+      content: "first question",
+      timestamp: 0,
+    });
+    const sourceEntryId = appendNativeAssistant(
+      sessionManager,
+      "answer still visible after the first compaction",
+    );
+    appendNativeCompaction(sessionManager, firstKeptEntryId);
+    appendNativeAssistant(sessionManager, "partial answer", "aborted");
+    const compaction = appendNativeCompaction(sessionManager);
+
+    expect(selectFrom(sessionManager, compaction.id)).toEqual({
+      entryId: sourceEntryId,
+      text: "answer still visible after the first compaction",
+    });
+  });
+
+  it("falls back to the newest text from before the previous compaction when nothing newer survives", () => {
+    // The first cut dropped this answer without a display copy (copy disabled or a
+    // host-only compaction), so it is the last assistant text the user saw before
+    // the second cut. Restoring it is best-effort continuity, not resurrection of
+    // text that was visible a moment ago.
+    const sessionManager = SessionManager.inMemory();
+    const sourceEntryId = appendNativeAssistant(
+      sessionManager,
+      "answer hidden by the first compaction",
+    );
+    const firstKeptEntryId = sessionManager.appendMessage({
+      role: "user",
+      content: "question after the hidden answer",
+      timestamp: 0,
+    });
+    appendNativeCompaction(sessionManager, firstKeptEntryId);
+    appendNativeAssistant(sessionManager, "partial answer", "aborted");
+    const compaction = appendNativeCompaction(sessionManager);
+
+    expect(selectFrom(sessionManager, compaction.id)).toEqual({
+      entryId: sourceEntryId,
+      text: "answer hidden by the first compaction",
+    });
+  });
+
+  it("keeps the same text visible across consecutive compactions", () => {
+    const sessionManager = SessionManager.inMemory();
+    const sourceEntryId = appendNativeAssistant(sessionManager, "only assistant answer");
+    const firstCompaction = appendNativeCompaction(sessionManager);
+    makeHarness({ sessionManager, compaction: firstCompaction }).invoke();
+    appendNativeAssistant(sessionManager, "partial answer", "aborted");
+    const secondCompaction = appendNativeCompaction(sessionManager);
+    makeHarness({ sessionManager, compaction: secondCompaction }).invoke();
+
+    // Each compaction owns its copy; only the newest one is after the latest cut,
+    // so the rebuilt view still shows the answer exactly once.
+    expect(nativeOutputCopies(sessionManager)).toEqual([
+      {
+        text: "only assistant answer",
+        sourceEntryId,
+        compactionEntryId: firstCompaction.id,
+        truncated: false,
+      },
+      {
+        text: "only assistant answer",
+        sourceEntryId,
+        compactionEntryId: secondCompaction.id,
+        truncated: false,
+      },
+    ]);
+  });
+});
+
+describe("copy placement in the rebuilt view", () => {
+  it("renders the copy after the retained tail and before later turns", () => {
+    const sessionManager = SessionManager.inMemory();
+    sessionManager.appendMessage({ role: "user", content: "first question", timestamp: 0 });
+    appendNativeAssistant(sessionManager, "dropped answer");
+    const firstKeptEntryId = sessionManager.appendMessage({
+      role: "user",
+      content: "second question",
+      timestamp: 0,
+    });
+    const retainedAnswer = appendNativeAssistant(sessionManager, "retained answer");
+    const compaction = appendNativeCompaction(sessionManager, firstKeptEntryId);
+    makeHarness({ sessionManager, compaction }).invoke();
+    const afterCompaction = appendNativeAssistant(sessionManager, "next turn answer");
+
+    const context = sessionManager.buildContextEntries();
+    const copy = context.find(
+      (entry) => entry.type === "custom" && entry.customType === PRE_COMPACTION_OUTPUT_TYPE,
+    );
+    if (copy?.type !== "custom") throw new Error("Expected the display copy in the rebuilt view");
+    // The TUI renders buildContextEntries().slice(1) and appends the compaction
+    // card, so everything here is visible after the rebuild.
+    expect(context.map((entry) => entry.id)).toEqual([
+      compaction.id,
+      firstKeptEntryId,
+      retainedAnswer,
+      copy.id,
+      afterCompaction,
+    ]);
+  });
+});
+
+describe("older hosts without entry renderers", () => {
+  it("registers no session_compact handler", () => {
+    const on = vi.fn();
+    const runtime = {
+      ensureConfig: vi.fn(),
+      config: { showPreCompactionMessage: true, debugLog: false },
+    };
+    registerPreCompactionOutput(
+      { on } as unknown as Parameters<typeof registerPreCompactionOutput>[0],
+      runtime as unknown as Parameters<typeof registerPreCompactionOutput>[1],
+    );
+    expect(on).not.toHaveBeenCalled();
   });
 });
 
