@@ -3,6 +3,7 @@
 ### Fixed
 
 - **Extension loads on omp again.** 0.5.14 built the reflector's supersedes schema by reading `.properties` back from the base schema at import time. Hosts that shim `typebox` with callable schemas (oh-my-pi's omptype) have no `.properties`, so the extension failed to load and `omp plugin install` rejected it, even with `reflectionSupersedes` off; this second failure was reported in [#174](https://github.com/k0valik/pi-blackhole/issues/174). Both reflector schemas now compose from shared field definitions, and the schema pi sends is unchanged.
+- **`showPreCompactionMessage` works again after compaction.** The handler scanned the session path in the wrong direction, so the display-only copy was never appended and the last answer or approval question disappeared with the truncated history. It now finds the newest dropped assistant text; model context and retention are unchanged.
 
 ---
 

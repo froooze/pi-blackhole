@@ -192,7 +192,7 @@ Default `true`. After a successful Blackhole compaction, append a display-only c
 
 The copy is **cosmetic**: Pi renders the entry but never sends it to the model (`sessionEntryToContextMessages` returns nothing for plain `custom` entries), and Blackhole's own serializers only read `message`, `custom_message`, and `branch_summary` entries. It does not change `firstKeptEntryId`, the summary, or the auto-compaction threshold.
 
-When the newest dropped message is already retained by the cut (the common `minimal` case, where the last user turn and everything after it stay visible), nothing is copied — no duplicates. Compact-all with no retained tail copies the final answer instead.
+When the newest answer is already retained by the cut (the common `minimal` case, where the last user turn and everything after it stay visible), the newest answer the cut actually dropped is copied instead — retained entries are never duplicated. When everything the cut hid is retained, nothing is copied. Compact-all with no retained tail copies the final answer.
 
 Things that stay out of the copy: tool output, thinking blocks, images, and exact card layout. The copy is truncated at 16 KiB with a `[Copy truncated]` marker; each eligible compaction adds one entry to the session file (a bounded disk and redraw cost, not a token cost).
 
