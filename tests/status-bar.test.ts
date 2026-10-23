@@ -219,6 +219,50 @@ describe("status bar", () => {
       expect(h.lastStatus()).toContain("themed:success:bh");
     });
 
+    it("binds fg to the proxy receiver", async () => {
+      // The installed host exposes `ui.theme` as a Proxy over the active Theme,
+      // so a method read through it must run with the proxy as `this`.
+      const theme: { fg: (style: string, text: string) => string } = new Proxy(
+        {
+          fg(style: string, text: string) {
+            return `${this === theme ? "proxy-receiver" : "wrong-receiver"}:${style}:${text}`;
+          },
+        },
+        { get: (target, prop, receiver) => Reflect.get(target, prop, receiver) },
+      );
+      const h = setup();
+      await h.fire(
+        "session_start",
+        {},
+        { ...h.ctx, hasUI: true, ui: { setStatus: h.setStatus, theme } },
+      );
+      expect(h.lastStatus()).toContain("proxy-receiver:success:bh");
+    });
+
+    it("renders plain status when the theme object has no fg yet", async () => {
+      // A bridge may hand out a partially built theme object: truthy, so the
+      // `t ? ...` branch is taken, but `fg` is still missing.
+      const h = setup();
+      const ui = { setStatus: h.setStatus, theme: {} };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("re-renders with the new theme after the theme changes", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: { fg: (style: string, text: string) => `A-${style}:${text}` },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toContain("A-success:bh");
+      ui.theme = { fg: (style: string, text: string) => `B-${style}:${text}` };
+      // No ledger change: only the idle poll re-renders.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.lastStatus()).toContain("B-success:bh");
+      expect(h.lastStatus()).not.toContain("A-success:bh");
+    });
+
     it("picks up a theme initialized after session_start without a ledger change", async () => {
       const h = setup();
       let ready = false;
