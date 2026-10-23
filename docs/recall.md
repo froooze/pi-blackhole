@@ -118,7 +118,10 @@ Results shown as a collapsible message and auto-fed to the agent as context. Cal
 All session access goes through `loadAllMessages()` in [[src/core/load-messages.ts]]. LRU cache:
 
 - Max 3 entries
-- 2-second TTL
+- 2-second TTL, actively released by an unref'ed timer (also checked on access)
+- Source files above 64 MiB are not cached; recall rescans them on every call
+- Total retained source bytes capped at 128 MiB, evicting the oldest entries first
+  (source bytes approximate weight — decoded objects are several times larger)
 - mtime-based invalidation (detects file changes between cache hits)
 - Cache key includes `allowedEntryIds` set (sorted JSON for collision-free lineage filtering)
 - Parse errors logged via `console.warn()` but don't throw

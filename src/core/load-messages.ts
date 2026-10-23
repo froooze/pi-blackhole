@@ -16,11 +16,71 @@ interface CacheEntry {
   result: LoadedMessages;
   mtimeMs: number;
   timestamp: number;
+  /** Source JSONL bytes held by this entry — an approximate retained weight. */
+  sourceBytes: number;
+  timer?: NodeJS.Timeout;
 }
 
 const MAX_CACHE_SIZE = 3;
 const CACHE_TTL_MS = 2_000;
+// A cache entry keeps a complete parse of the file (raw messages plus rendered
+// summaries), and decoded objects can be several times the JSONL size. Without
+// a weight bound, three distinct recall keys retained three complete parses of
+// the same large session (#183). Sessions above the per-entry limit are still
+// recalled, just rescanned instead of cached.
+const MAX_CACHE_ENTRY_SOURCE_BYTES = 64 * 1024 * 1024;
+const MAX_CACHE_TOTAL_SOURCE_BYTES = 128 * 1024 * 1024;
+
+interface CacheLimits {
+  maxEntries: number;
+  maxEntrySourceBytes: number;
+  maxTotalSourceBytes: number;
+  ttlMs: number;
+}
+
+const limits: CacheLimits = {
+  maxEntries: MAX_CACHE_SIZE,
+  maxEntrySourceBytes: MAX_CACHE_ENTRY_SOURCE_BYTES,
+  maxTotalSourceBytes: MAX_CACHE_TOTAL_SOURCE_BYTES,
+  ttlMs: CACHE_TTL_MS,
+};
+
 const cache = new Map<string, CacheEntry>();
+let retainedSourceBytes = 0;
+
+/** Drop one cached entry, releasing its timer and weight exactly once. */
+function release(key: string): void {
+  const entry = cache.get(key);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  retainedSourceBytes -= entry.sourceBytes;
+  cache.delete(key);
+}
+
+// ── Diagnostics (not part of the extension API) ────────────────────────────
+// Exposed so tests and local probes can assert bounds without writing
+// hundreds of MiB. Production code never calls these.
+
+export interface SessionCacheStats {
+  entries: number;
+  retainedSourceBytes: number;
+  keys: string[];
+}
+
+export const getSessionCacheStats = (): SessionCacheStats => ({
+  entries: cache.size,
+  retainedSourceBytes,
+  keys: [...cache.keys()],
+});
+
+export const clearSessionCache = (): void => {
+  // Map iteration stays valid while the current entry is deleted.
+  for (const key of cache.keys()) release(key);
+};
+
+export const configureSessionCache = (next: Partial<CacheLimits>): void => {
+  Object.assign(limits, next);
+};
 
 function cacheKey(
   sessionFile: string,
@@ -45,8 +105,8 @@ function getCached(
   if (!entry) return undefined;
 
   // Check TTL (mtime-based invalidation)
-  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
-    cache.delete(key);
+  if (Date.now() - entry.timestamp > limits.ttlMs) {
+    release(key);
     return undefined;
   }
 
@@ -54,11 +114,11 @@ function getCached(
   try {
     const mtimeMs = statSync(sessionFile).mtimeMs;
     if (mtimeMs !== entry.mtimeMs) {
-      cache.delete(key);
+      release(key);
       return undefined;
     }
   } catch {
-    cache.delete(key);
+    release(key);
     return undefined;
   }
 
@@ -71,19 +131,52 @@ function setCache(
   allowedEntryIds: Set<string> | undefined,
   result: LoadedMessages,
 ): void {
-  // Evict oldest if at capacity
-  if (cache.size >= MAX_CACHE_SIZE) {
-    const oldest = cache.entries().next();
-    if (!oldest.done) cache.delete(oldest.value[0]);
-  }
-
+  let sourceBytes: number;
+  let mtimeMs: number;
   try {
-    const mtimeMs = statSync(sessionFile).mtimeMs;
-    const key = cacheKey(sessionFile, full, allowedEntryIds);
-    cache.set(key, { result, mtimeMs, timestamp: Date.now() });
+    const stat = statSync(sessionFile);
+    sourceBytes = stat.size;
+    mtimeMs = stat.mtimeMs;
   } catch {
     // Can't stat the file — don't cache
+    return;
   }
+
+  const key = cacheKey(sessionFile, full, allowedEntryIds);
+  // Replace a previous entry for this key (its timer and weight go with it).
+  release(key);
+
+  // Too large to retain (individually or at all): recall rescans every call.
+  if (sourceBytes > limits.maxEntrySourceBytes || sourceBytes > limits.maxTotalSourceBytes) {
+    return;
+  }
+
+  // Evict oldest until both the entry-count and retained-byte budgets fit.
+  while (
+    cache.size >= limits.maxEntries ||
+    retainedSourceBytes + sourceBytes > limits.maxTotalSourceBytes
+  ) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    release(oldest.value);
+  }
+
+  const entry: CacheEntry = {
+    result,
+    mtimeMs,
+    timestamp: Date.now(),
+    sourceBytes,
+  };
+  const timer = setTimeout(() => {
+    // A newer entry may own this key by now (e.g. this callback was queued
+    // before the replacement landed) — only expire our own entry.
+    if (cache.get(key) === entry) release(key);
+  }, limits.ttlMs);
+  timer.unref();
+  entry.timer = timer;
+
+  cache.set(key, entry);
+  retainedSourceBytes += sourceBytes;
 }
 
 export const loadAllMessages = (
