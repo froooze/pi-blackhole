@@ -13,6 +13,7 @@ vi.mock("../src/om/debug-log.js", () => ({
   debugLog: vi.fn(),
 }));
 
+import { debugLog } from "../src/om/debug-log.js";
 import { registerStatusBar } from "../src/om/status-bar.js";
 import {
   OM_OBSERVATIONS_DROPPED,
@@ -263,6 +264,80 @@ describe("status bar", () => {
       expect(h.lastStatus()).not.toContain("A-success:bh");
     });
 
+    it("falls back to plain status when a theme fg throws at call time", async () => {
+      // A bridge may wrap the host theme method-by-method, so acquiring `fg`
+      // succeeds while calling it still throws until the host is initialized.
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: {
+          fg: () => {
+            throw new Error("Theme not initialized. Call initTheme() first.");
+          },
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("does not throw from the idle timer when a theme fg throws at call time", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: { fg: (style: string, text: string) => `S-${style}:${text}` },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toContain("S-success:bh");
+      ui.theme = {
+        fg: () => {
+          throw new Error("Theme not initialized. Call initTheme() first.");
+        },
+      };
+      expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("restores colors after a call-time theme failure on an earlier render", async () => {
+      const h = setup();
+      let ready = false;
+      const theme = {
+        fg: (style: string, text: string) => {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return `${style}:${text}`;
+        },
+      };
+      await h.fire(
+        "session_start",
+        {},
+        { ...h.ctx, hasUI: true, ui: { setStatus: h.setStatus, theme } },
+      );
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+      ready = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.lastStatus()).toContain("success:bh");
+    });
+
+    it("records a call-time theme failure in the debug log", async () => {
+      vi.mocked(debugLog).mockClear();
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: {
+          fg: () => {
+            throw new Error("Theme not initialized. Call initTheme() first.");
+          },
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      // The fallback must not hide an unrelated formatting failure (e.g. a
+      // misspelled style key) completely.
+      expect(debugLog).toHaveBeenCalledWith(
+        "statusBar.themeRenderFailed",
+        { error: expect.stringContaining("Theme not initialized") },
+        false,
+      );
+    });
+
     it("picks up a theme initialized after session_start without a ledger change", async () => {
       const h = setup();
       let ready = false;
@@ -280,7 +355,7 @@ describe("status bar", () => {
       expect(h.lastStatus()).toContain("success:bh");
     });
 
-    it.each(["spinner", "settle"])("keeps the %s timer safe without a theme", async (timer) => {
+    it("keeps the spinner timer safe without a theme", async () => {
       const h = setup();
       let ready = true;
       const theme = { fg: (_style: string, text: string) => text };
@@ -293,19 +368,33 @@ describe("status bar", () => {
       };
       const ctx = { ...h.ctx, hasUI: true, ui };
       await h.fire("session_start", {}, ctx);
-      if (timer === "spinner") {
-        h.runtime.consolidationInFlight = true;
-        h.runtime.consolidationPhase = "observer";
-        await h.fire("agent_start", {}, ctx);
-        expect(h.lastStatus()).toContain("[observer]");
-      } else {
-        await h.fire("session_compact", { reason: "manual" }, ctx);
-        expect(h.lastStatus()).toContain("[compact]");
-      }
+      h.runtime.consolidationInFlight = true;
+      h.runtime.consolidationPhase = "observer";
+      await h.fire("agent_start", {}, ctx);
+      expect(h.lastStatus()).toContain("[observer]");
       ready = false;
-      expect(() => vi.advanceTimersByTime(timer === "spinner" ? 80 : 5_000)).not.toThrow();
-      if (timer === "spinner") expect(h.lastStatus()).toContain("⠙ [observer]");
-      else expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+      expect(() => vi.advanceTimersByTime(80)).not.toThrow();
+      expect(h.lastStatus()).toContain("⠙ [observer]");
+    });
+
+    it("keeps the settle timer safe without a theme", async () => {
+      const h = setup();
+      let ready = true;
+      const theme = { fg: (_style: string, text: string) => text };
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return theme;
+        },
+      };
+      const ctx = { ...h.ctx, hasUI: true, ui };
+      await h.fire("session_start", {}, ctx);
+      await h.fire("session_compact", { reason: "manual" }, ctx);
+      expect(h.lastStatus()).toContain("[compact]");
+      ready = false;
+      expect(() => vi.advanceTimersByTime(5_000)).not.toThrow();
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
     });
   });
 
