@@ -11,6 +11,7 @@ import { observedPrefixIndex } from "../core/observation-boundary.js";
 import { observeTailOnShutdown } from "./shutdown-observe.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesSkippedProvider } from "../core/provider-skip.js";
+import type { SubagentContextLike } from "../core/subagent-detector.js";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ConfiguredModel } from "./config.js";
 import { debugLog, withDebugLogContext } from "./debug-log.js";
@@ -643,8 +644,11 @@ function currentSessionIdentity(ctx: ConsolidationCtx): string | undefined {
 }
 
 export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     runtime.startSession(currentSessionIdentity(ctx as ConsolidationCtx));
+    // Decide subagent-vs-main once per session and register main ancestry for
+    // children spawned later. Gating itself stays per-event (see isMemoryEnabled).
+    runtime.noteSessionStart(ctx as unknown as SubagentContextLike, event);
   });
   pi.on("session_shutdown", (event, ctx) => observeTailOnShutdown(pi, runtime, ctx, event.reason));
   const launch = (_event: unknown, ctx: ConsolidationCtx) => {
@@ -696,7 +700,10 @@ function validateCursors(entries: Entry[], runtime: Runtime): void {
 
 function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
   runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
-  if (runtime.config.memory === false) return;
+  if (!runtime.isMemoryEnabled(ctx)) {
+    if (runtime.config.memory !== false) runtime.noteSubagentMemorySkip(ctx);
+    return;
+  }
 
   // Provider-aware skip: another engine owns this provider (e.g. Codex native
   // compaction); blackhole also steps aside from observational-memory

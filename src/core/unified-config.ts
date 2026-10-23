@@ -18,6 +18,8 @@ import {
 export { CACHE_RETENTION_VALUES, normalizeCacheRetention };
 import { getAgentDir as originalGetAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CacheRetention, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { SubagentMemoryMode } from "./subagent-detector.js";
+import { normalizeSubagentMemoryMode } from "./subagent-detector.js";
 
 // ── getAgentDir with PI_CODING_AGENT_DIR override ───────────────────────────
 
@@ -282,6 +284,10 @@ export interface UnifiedConfig {
   passive?: boolean;
   /** Enables observational memory (workers + content injection). Set to false for pi-vcc only. */
   memory: boolean;
+  /** In detected subagent sessions: "off" skips OM workers and injection,
+   *  "inherit" keeps the same behavior as the main session. Compaction is not
+   *  affected. Detected via src/core/subagent-detector.ts. */
+  subagentMemory: SubagentMemoryMode;
   /** Writes debug JSONL to agent directory. */
   debugLog: boolean;
   /** Show the blackhole footer status bar (token gauges + worker events). */
@@ -350,6 +356,7 @@ export const DEFAULTS: UnifiedConfig = {
   cacheRetention: undefined,
 
   memory: true,
+  subagentMemory: "off",
   debugLog: false,
   statusBar: true,
   showWorkerNotifications: true,
@@ -633,6 +640,8 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   if (typeof raw.noAutoCompact === "boolean") c.noAutoCompact = raw.noAutoCompact;
   if (typeof raw.passive === "boolean") c.passive = raw.passive;
   if (typeof raw.memory === "boolean") c.memory = raw.memory;
+  const subagentMemory = normalizeSubagentMemoryMode(raw.subagentMemory);
+  if (subagentMemory !== undefined) c.subagentMemory = subagentMemory;
   if (typeof raw.reflectionTimestamps === "boolean")
     c.reflectionTimestamps = raw.reflectionTimestamps;
   if (typeof raw.reflectionSupersedes === "boolean")

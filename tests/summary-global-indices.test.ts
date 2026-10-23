@@ -135,6 +135,8 @@ function hookHarness(allEntries: any[], config: Record<string, unknown> = {}) {
       retainedToolOutputMaxTokens: 0,
       ...config,
     },
+    isMemoryEnabled: () => omRuntime.config.memory !== false,
+    noteSubagentMemorySkip: vi.fn(),
   } as any;
   const ctx = {
     cwd: "/synthetic",

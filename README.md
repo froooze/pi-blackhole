@@ -231,6 +231,8 @@ Each worker uses an `agentLoop` with tool-calling capabilities — they don't ju
 
 Optional `observeOnShutdown` (default `false`) makes at most one observer request on an eligible persisted session's unobserved tail before quit, new, resume or fork. The minimum is 200 raw tokens; one shared 20-second deadline covers waiting for in-flight consolidation and the request. No new reflector, dropper, retry or multi-chunk drain is launched. Reload is skipped. Forced exits and hosts with shorter shutdown deadlines may prevent completion. See [shutdown observation](docs/observational-memory.md#session-shutdown-observation).
 
+Subagent sessions are detected automatically and run **no OM workers or OM injection** by default (`subagentMemory: "off"`); compaction is unaffected. Set `subagentMemory: "inherit"` (or `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit`) to let children follow the main session's `memory` value. Detection is best-effort and fails open to "main session"; unsupported runners can add env markers via `PI_BLACKHOLE_SUBAGENT_MARKERS`. See [`docs/CONFIG.md` → subagentMemory](docs/CONFIG.md#subagentmemory).
+
 If any stage fails (model error, rate limit, timeout), remaining stages are skipped and the full pipeline retries on the next `agent_start` or `turn_end`. A 30-second retry gate prevents hammering failing APIs. Within each stage, the runtime tries all configured fallback models before giving up — each failed model is cooled down and skipped in subsequent attempts.
 
 ---

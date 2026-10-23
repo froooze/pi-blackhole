@@ -102,6 +102,8 @@ function setup(configOverrides: Record<string, unknown> = {}): Harness {
       compactAfterTokens: 100_000,
       ...configOverrides,
     },
+    isMemoryEnabled: () => runtime.config.memory !== false,
+    noteSubagentMemorySkip: vi.fn(),
     consolidationInFlight: false,
     consolidationPhase: undefined,
   };

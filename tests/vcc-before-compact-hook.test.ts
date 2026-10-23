@@ -59,6 +59,8 @@ function createMockPi(
   const omRuntime = {
     ensureConfig: vi.fn(() => {}),
     config,
+    isMemoryEnabled: () => config.memory !== false,
+    noteSubagentMemorySkip: vi.fn(),
   };
   return {
     pi: {

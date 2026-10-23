@@ -25,6 +25,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Runtime, ConsolidationPhase } from "./runtime.js";
+import type { SubagentContextLike } from "../core/subagent-detector.js";
 import {
   foldLedger,
   observationPoolTokens,
@@ -142,7 +143,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     // O and P describe observational-memory work the consolidation pipeline
     // never launches while memory === false (it hard-returns first), so a
     // filling gauge would promise a note-taking pass that cannot run.
-    if (cfg.memory !== false) {
+    if (runtime.isMemoryEnabled(lastCtx as unknown as SubagentContextLike | undefined)) {
       segments.push(`${t.fg("muted", "O")}${gaugeBar(t, gauges.obsSince, cfg.observeAfterTokens)}`);
       segments.push(
         `${t.fg("muted", "P")}${gaugeBar(t, gauges.pool, cfg.observationsPoolMaxTokens)}`,
@@ -291,7 +292,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     lastTailId = entries[entries.length - 1]?.id;
     lastInFlight = runtime.consolidationInFlight;
     lastPhase = runtime.consolidationPhase;
-    const memoryOn = runtime.config.memory !== false;
+    const memoryOn = runtime.isMemoryEnabled(ctx as unknown as SubagentContextLike);
     lastMemoryOn = memoryOn;
     // foldLedger also feeds syncWorkers (worker deltas), so it always runs;
     // the two O/P-only scans are skipped while memory is off, since nothing
@@ -323,7 +324,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
       runtime.consolidationPhase === lastPhase &&
       // A memory flip changes which gauges are measured, so it forces a
       // recompute instead of a bare render (stale zeros otherwise).
-      (runtime.config.memory !== false) === lastMemoryOn
+      runtime.isMemoryEnabled(lastCtx as unknown as SubagentContextLike) === lastMemoryOn
     ) {
       try {
         const entries = branchOf(lastCtx);

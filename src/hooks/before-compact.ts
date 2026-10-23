@@ -594,8 +594,8 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
             summary +
               "\n\n" +
               renderSummary(
-                omRuntime.config.memory === false ? [] : projection.reflections,
-                omRuntime.config.memory === false ? [] : projection.observations,
+                omRuntime.isMemoryEnabled(ctx) ? projection.reflections : [],
+                omRuntime.isMemoryEnabled(ctx) ? projection.observations : [],
                 renderOptionsFromConfig(omRuntime.config),
               ),
           );
@@ -858,9 +858,9 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     let omDetails: Record<string, unknown> | undefined;
     let omHasContent = false;
     trace("before_compact.om_injection", {
-      memoryEnabled: omRuntime.config.memory !== false,
+      memoryEnabled: omRuntime.isMemoryEnabled(ctx),
     });
-    if (omRuntime.config.memory !== false) {
+    if (omRuntime.isMemoryEnabled(ctx)) {
       // A conservative tool-safe cut can precede the completed batch end.
       // Include completed OM facts even when that means duplicating a little
       // retained raw evidence; never lose earlier facts from a straddling batch.

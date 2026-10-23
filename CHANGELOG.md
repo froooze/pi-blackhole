@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- **Observational memory is off in subagent sessions by default.** `subagentMemory` (`"off"` | `"inherit"`, default `"off"`; env `PI_BLACKHOLE_SUBAGENT_MEMORY`) skips OM workers and OM injection in detected children while leaving compaction untouched. Detection is centralized in `src/core/subagent-detector.ts`: known runner env markers, runner-owned session paths and custom entries, in-memory `fork`, and a generic ancestry marker (`PI_BLACKHOLE_ROOT_SESSIONS`) registered by each main session, which also covers in-process runners that expose no marker (including `kunkun9527/pi-subagents-lean`). Under `"off"`, an inherited `PI_BLACKHOLE_MEMORY=true` cannot re-enable a child; opt back in per child with `inherit`. `PI_BLACKHOLE_SUBAGENT_MARKERS` accepts extra env names for unsupported runners.
+
 ### Fixed
 
 - **Recall no longer retains unbounded parses of large sessions.** The session-file cache held up to three complete parses of a JSONL regardless of file size, so distinct recall keys on a 222 MiB session could keep hundreds of MiB of heap alive ([#183](https://github.com/k0valik/pi-blackhole/issues/183)). A source file above 64 MiB is no longer cached (recall rescans it), total retained source bytes are capped at 128 MiB with oldest-first eviction, and expired entries are now released by an unref'ed timer instead of only on the next cache access. The 3-entry limit, 2-second TTL and mtime invalidation are unchanged.

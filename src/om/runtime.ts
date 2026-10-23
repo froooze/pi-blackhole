@@ -30,6 +30,15 @@ import type { PendingOMState } from "./pending.js";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AuthResult } from "@earendil-works/pi-ai";
 import { debugLog } from "./debug-log.js";
+import {
+  detectSubagentSession,
+  isSubagentMemoryDisabled,
+  probeFromContext,
+  registerRootSession,
+  type SubagentContextLike,
+  type SubagentDecision,
+  type SubagentStartReason,
+} from "../core/subagent-detector.js";
 
 /** A model entry with a resolvable identity (provider+id). Thinking-only
  *  modifiers (`{ thinking }`) lack this and are skipped as candidates. */
@@ -282,6 +291,18 @@ export class Runtime {
   private shutdownContextIsActive: (() => boolean) | undefined;
   private lifecycleController = new AbortController();
   private compactionTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Subagent decisions keyed by session id. In-process children share this
+   * Runtime with the parent, so a single boolean would flip the parent's
+   * gating too. Detection is cached because the entry/path probe is not free.
+   */
+  private subagentDecisions = new Map<string, SubagentDecision>();
+  private subagentSkipLogged = new Set<string>();
+  /** Fallback for call sites without a ctx (shutdown, status bar). */
+  private lastSubagentDecision: SubagentDecision = {
+    isSubagent: false,
+    reason: "session:main",
+  };
 
   guardShutdownContext(isActive: () => boolean): void {
     this.shutdownContextIsActive = isActive;
@@ -327,6 +348,83 @@ export class Runtime {
       this.compactInFlight = false;
     }
     this.sessionIdentity = sessionIdentity;
+  }
+
+  private sessionIdOf(ctx: SubagentContextLike | undefined): string | undefined {
+    try {
+      return ctx?.sessionManager?.getSessionId?.();
+    } catch {
+      return undefined;
+    }
+  }
+
+  private cacheSubagentDecision(sessionId: string | undefined, decision: SubagentDecision): void {
+    this.lastSubagentDecision = decision;
+    if (sessionId) this.subagentDecisions.set(sessionId, decision);
+  }
+
+  /**
+   * Decide once per session at session_start. Every main session registers its
+   * id in the ancestry env var so any child spawned afterwards — in-process or
+   * detached — can be recognised without runner-specific knowledge.
+   */
+  noteSessionStart(
+    ctx: SubagentContextLike | undefined,
+    start?: { reason?: SubagentStartReason; previousSessionFile?: string },
+  ): SubagentDecision {
+    const probe = probeFromContext(ctx, start);
+    const decision = detectSubagentSession(probe);
+    this.cacheSubagentDecision(probe.sessionId, decision);
+    if (!decision.isSubagent) registerRootSession(probe.sessionId);
+    debugLog(
+      "subagent.detect",
+      { sessionId: probe.sessionId, isSubagent: decision.isSubagent, reason: decision.reason },
+      this.config.debugLog === true,
+    );
+    return decision;
+  }
+
+  /** Cached per-session decision, probing on first use if session_start missed it. */
+  getSubagentDecision(ctx?: SubagentContextLike): SubagentDecision {
+    const sessionId = this.sessionIdOf(ctx);
+    if (sessionId) {
+      const cached = this.subagentDecisions.get(sessionId);
+      if (cached) {
+        this.lastSubagentDecision = cached;
+        return cached;
+      }
+    }
+    if (!ctx) return this.lastSubagentDecision;
+    const decision = detectSubagentSession(probeFromContext(ctx));
+    this.cacheSubagentDecision(sessionId, decision);
+    // Self-heal a host that did not deliver session_start before the first
+    // worker trigger: a main session still needs its ancestry marker.
+    if (!decision.isSubagent) registerRootSession(sessionId);
+    return decision;
+  }
+
+  /**
+   * Effective observational-memory switch for THIS event's session. Never
+   * mutates `config`: in-process subagents share one Runtime, so a write would
+   * disable OM for the parent as well.
+   */
+  isMemoryEnabled(ctx?: SubagentContextLike, config: Runtime["config"] = this.config): boolean {
+    if (config.memory === false) return false;
+    if ((config.subagentMemory ?? "off") !== "off") return true;
+    return !isSubagentMemoryDisabled(config.subagentMemory, this.getSubagentDecision(ctx));
+  }
+
+  /** Debug-log the first skipped OM launch per session. */
+  noteSubagentMemorySkip(ctx?: SubagentContextLike): void {
+    const decision = this.getSubagentDecision(ctx);
+    const sessionId = this.sessionIdOf(ctx) ?? "<unknown>";
+    if (this.subagentSkipLogged.has(sessionId)) return;
+    this.subagentSkipLogged.add(sessionId);
+    debugLog(
+      "subagent.memory_skipped",
+      { sessionId, reason: decision.reason },
+      this.config.debugLog === true,
+    );
   }
 
   /**

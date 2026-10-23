@@ -19,6 +19,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ConfigManager } from "../pi-base/config-manager.js";
 import { getPiAgentDir } from "../pi-base/paths.js";
 import { DECLARATIVE_ENV_OVERRIDES } from "../core/config-env.js";
+import { normalizeSubagentMemoryMode } from "../core/subagent-detector.js";
 import {
   CACHE_RETENTION_VALUES,
   DEFAULTS,
@@ -214,6 +215,19 @@ export const config = new ConfigManager<UnifiedConfig>({
       valueDescriptions: {
         on: "Active — OM workers + content injection enabled",
         off: "Suspended — OM disabled",
+      },
+    },
+    {
+      key: "subagentMemory",
+      type: "enum",
+      label: "Subagent observational memory",
+      description:
+        "In detected subagent sessions: off skips OM workers and injection, inherit keeps the main-session behavior. Compaction is unaffected.",
+      value: cfg.subagentMemory ?? "off",
+      options: ["off", "inherit"],
+      optionLabels: {
+        off: "off — no OM in subagents (default)",
+        inherit: "inherit — run OM in subagents too",
       },
     },
     {
@@ -466,6 +480,9 @@ export const config = new ConfigManager<UnifiedConfig>({
     const parsed = { ...raw } as Partial<UnifiedConfig>;
     if (parsed.contextPressureFallback !== "off" && parsed.contextPressureFallback !== "vcc")
       delete parsed.contextPressureFallback;
+    const subagentMemory = normalizeSubagentMemoryMode(parsed.subagentMemory);
+    if (subagentMemory === undefined) delete parsed.subagentMemory;
+    else parsed.subagentMemory = subagentMemory;
 
     // ── Migration: legacy keys → new surface ──
     if (parsed.compaction === undefined && parsed.compactionEngine === undefined) {

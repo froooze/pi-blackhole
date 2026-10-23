@@ -1,9 +1,9 @@
 # Plan 08 — Subagent memory gating: disable OM workers in subagent sessions
 
-**Date:** 2026-10-12
-**Status:** OPEN-ENDED DRAFT — no code changes yet, will iterate. Not an exact design document.
-**Inputs:** https://github.com/k0valik/pi-blackhole/issues/147 (+ comments), linked #146 (credential leak, closed — out of scope), local clones in `/tmp/pi-subagents-map/` (15 repos: 10 in the first wave + 5 in the second wave below, depth-1, Oct 2026), current `src/om/consolidation.ts` + `src/om/compaction-trigger.ts` + `src/om/runtime.ts` + `src/core/unified-config.ts` + `src/core/config-env.ts`
-**Direction agreed:** combination of option 2 (builtin detection + config knob, best-effort per-event gating) and option 3 (explicit env passthrough contract + docs). Our side only. Docs-only and downscale/profile variants deferred (see §9).
+**Date:** 2026-10-12 (updated 2026-10-23)
+**Status:** IMPLEMENTED on `feat/subagent-memory-gating` — `subagentMemory: "off" | "inherit"` (default `"off"`), centralized detection, per-event gating, docs and tests. Pending release/soak.
+**Inputs:** https://github.com/k0valik/pi-blackhole/issues/147 (+ comments, including Skelectric's `pi-blackhole-child-guard` report), linked #146 (credential leak, closed — out of scope), local clones in `/tmp/pi-subagents-map/` (16 repos: the 15 surveyed repos plus `kunkun9527/pi-subagents-lean`, depth-1, Oct 2026; verification only — never built or executed), current `src/core/subagent-detector.ts` + `src/om/runtime.ts` + `src/om/consolidation.ts` + `src/om/shutdown-observe.ts` + `src/hooks/before-compact.ts` + `src/om/status-bar.ts` + `src/core/unified-config.ts` + `src/core/config-env.ts`
+**Direction agreed:** one builtin knob, defaulting to no OM in subagent sessions, with centralized best-effort detection. The explicit env-passthrough contract remains as an escape hatch for unsupported runners. Docs-only and downscale/profile variants deferred (see §9). No per-runner recipes are required for the default behavior.
 
 ---
 
@@ -26,11 +26,22 @@ Current workarounds (all manual, all confirmed in the thread):
 
 k0valik's open question: "how do I turn off the workers for the subagent sessions only" — answer from the thread: **there is no pi-level switch**, every subagent extension needs a different solution (fork-of-session vs headless detached vs in-process SDK), and some "inherit settings from the main agent" (kunkun). The `--blackhole-om off` flag idea (k0valik) only works for runners that forward CLI flags.
 
+### 1.1 What Skelectric's child guard proved
+
+The `pi-blackhole-child-guard` comment is the clearest evidence that a per-runner recipe cannot be the product answer:
+
+- It must run **before** Blackhole's factory / first `ensureConfig()` so the env is in place when config resolves. That means a wrapper extension plus a load-order guarantee, not a config change.
+- `PI_BLACKHOLE_PASSIVE=1` alone is not enough. The declarative env map runs afterwards, so whenever the parent process exports `PI_BLACKHOLE_MEMORY=true` into the child (several runners copy `process.env` wholesale), memory is re-enabled. The guard has to set `PI_BLACKHOLE_MEMORY=false` too.
+- It is all-or-nothing per child: re-enabling OM for one special subagent means unsetting/overriding two env vars in that runner's launch spec, and runners with no env passthrough cannot opt back in at all.
+- It knows the child identity only because the runner happens to set `PI_SUBAGENT_CHILD=1`. In-process runners without that marker (tintinweb, lean, ESSO, gotgenes, submarine, …) get nothing.
+
+The builtin knob replaces the shim: detection is centralized, `off` is the default, and the per-child opt-in is one documented value (`PI_BLACKHOLE_SUBAGENT_MEMORY=inherit`). A parent exporting `PI_BLACKHOLE_MEMORY=true` still cannot silently re-enable OM in a detected child; see the precedence table in §8.3.
+
 Out of scope: #146 (closed), the memory-share-of-summary numbers (informational), any change to main-session behavior.
 
 ## 2. North star
 
-**"Subagent sessions cost zero OM tokens by default, main sessions are untouched, and anyone who wants OM in a child can re-enable it with one knob."** Detection is best-effort and fails closed (unknown → treat as main session). No global config mutation from a child event (see §6).
+**"Subagent sessions cost zero OM tokens by default, main sessions are untouched, and anyone who wants OM in a child can re-enable it with one knob."** Detection is best-effort and fails closed (unknown → treat as main session). No global config mutation from a child event (see §8.2). Compaction is orthogonal: children keep whatever compaction engine their config resolves to; only OM workers and OM injection are gated.
 
 ## 3. Hard constraints (from the codebase)
 
@@ -38,7 +49,7 @@ Out of scope: #146 (closed), the memory-share-of-summary numbers (informational)
 2. **Process-wide shared runtime.** `Runtime.config` is a single object with cached `ensureConfig` (`src/om/runtime.ts:522`; call sites `src/om/consolidation.ts:613`, `src/om/compaction-trigger.ts:140,200,387`, hooks). Same-process in-memory children share it with the parent. Gating **must be per-event** (`ctx`-keyed early return), never `runtime.config` mutation.
 3. **Shared config file + inherited env.** Children read the same `~/.pi/agent/pi-blackhole/pi-blackhole-config.json` and usually inherit `process.env`. Differentiation must come from child-only signals (env markers set at spawn, session metadata, loader lists), not from config content.
 4. **`isPersisted() === false` is necessary but not sufficient.** It covers subagents _and_ SDK/flow runners _and_ unsaved user sessions. Precedent for branching on it exists (`src/om/compaction-trigger.ts:215-216` inline-mode resolution, stale-ctx handling) — reuse the pattern but always combine with a subagent-specific signal.
-5. **Env precedence ordering.** Passive block runs before `applyEnvOverrides(merged, DECLARATIVE_ENV_OVERRIDES, ...)` (`src/core/unified-config.ts:886-892`). Any new subagent knob must have a documented precedence vs `PI_BLACKHOLE_MEMORY` / `PI_BLACKHOLE_COMPACTION` and vs the config file.
+5. **Env precedence ordering.** Passive block runs before `applyEnvOverrides(merged, DECLARATIVE_ENV_OVERRIDES, ...)` (`src/core/unified-config.ts:886-892`). The subagent gate deliberately outranks a resolved `memory: true` (including one produced by an inherited `PI_BLACKHOLE_MEMORY=true`): under `subagentMemory: "off"`, a detected child stays off. The per-child opt-in is the knob itself (`PI_BLACKHOLE_SUBAGENT_MEMORY=inherit`), not a second memory variable. `memory: false` remains the global kill switch and wins everywhere.
 6. **Docs consistency rule** (AGENTS.md): every default number in README.md / docs/CONFIG.md / llms.txt must match `src/core/unified-config.ts` defaults. New knob defaults must be mirrored in all three.
 
 ## 4. Spawn-mechanism taxonomy (from the /tmp clones)
@@ -156,7 +167,16 @@ Out of scope: #146 (closed), the memory-share-of-summary numbers (informational)
 - Extension control: **yes, opt-in per job** — `subagent_spawn({ extensions?: [{path, tools}] })` (`src/tools.ts:70-99`, max 16; empty `tools:[]` = lifecycle-only); default child has zero non-bridge extensions. Omitting blackhole from the job's `extensions:` keeps it out (expected posture: "bridge present + self absent").
 - Blackhole detection: `PI_SUBAGENT_DEPTH > 0` (read at factory top-level); tool-shape (child has `subagent_send`+`subagent_wait`, lacks `subagent_spawn`/`subagent_inspect`); argv `--mode rpc` + `--no-session` + `-e …child-communication-bridge.ts…`.
 
-## 6. Proposed builtin marker set (Tier 1 — always works, env only)
+### 5.16 kunkun9527/pi-subagents-lean — `@ssk_dev/pi-subagents-lean@0.22.4` (entry `./index.ts`)
+
+- **Facade, not a runner.** It depends on `@tintinweb/pi-subagents@0.22.0` and re-exports a lean surface: one `subagent` facade tool, with the upstream manager driving child sessions. The lean package adds no spawn mechanism, no process, and no CLI.
+- In-process, in-memory children (same `SessionManager.inMemory` / `createAgentSession` path as §5.2). The upstream manager registry is the `globalThis[Symbol.for("pi-subagents:manager")]` singleton; children are not detached, so they share this process and `process.env`.
+- Signals: **no `PI_SUBAGENT_*` env marker of its own**. Tintinweb early-returns its extension body inside a child via an internal `AsyncLocalStorage` (`inChildSessionContext()`), which is invisible to Blackhole. The lean facade still registers its `subagent` tool in children with an empty captured-tool map.
+- Extension control: inherited from tintinweb/lean per-agent allowlist/denylist, but the default child loads the parent's extensions, so Blackhole does run there unless excluded.
+- **Blackhole detection:** the generic ancestry marker (parent id registered at `session_start`; child session id differs) is the only reliable signal. This is exactly the signal-less in-process case the ancestry design exists for; no lean-specific table entry is needed. The same applies to tintinweb, ESSO, gotgenes, submarine and any future in-process runner that inherits the process env.
+- **Verification policy:** clone-and-read only. Do not build, test, or execute any of the surveyed subagent extensions.
+
+## 6. Builtin marker set (Tier 1 — implemented, env only)
 
 Non-empty value ⇒ subagent session. Identity markers (not parent-side config knobs):
 
@@ -176,52 +196,92 @@ GENTLE_PI_AGENTS_OWNED_IPC (confirming, gentle-shell)
 PI_SUBAGENT_DEPTH (narumiruna — persists; nesting guard, read at factory top-level)
 ```
 
-Env present-but-unreliable (do NOT gate on these alone): `PI_SUBAGENT_BROKER_FD` / `PI_SUBAGENT_READINESS_FD` (deleted on import, visible only very early); `PI_SUBAGENT_HERDR` is reliable but herdr-path-only.
+`PI_SUBAGENT_HERDR` is accepted only when its value is not `off`/`0`/`false`, because `@bacnh85/pi-subagent` sets `off` in children to disable its herdr tool. `PI_SUBAGENT_DEPTH` is accepted only when it parses to `> 0`. Everything else uses the shared truthy rule (non-empty, not `0`/`false`/`no`/`off`).
+
+Env present-but-unreliable (do NOT gate on these alone): `PI_SUBAGENT_BROKER_FD` / `PI_SUBAGENT_READINESS_FD` (deleted on import, visible only very early). `PI_SUBAGENT_HERDR` is reliable but herdr-path-only.
 
 Deliberately excluded: `PI_SUBAGENT_TIMEOUT/IDLE_TIMEOUT/*_MINUTES`, `PI_SUBAGENT_DEADLINE/...` (parent-side config, not identity); `PI_SUBAGENTS_DEBUG`, `PI_CODING_AGENT_DIR/SESSION_DIR` (ambient); `PI_HERDSMAN_*`/`HERDR_*` alone (topology, keep as corroboration only); `GENTLE_PI_AGENTS_REQUESTED_TOOLS` (corroboration only).
 
 Plus user-extensible `PI_BLACKHOLE_SUBAGENT_MARKERS` (comma-separated extra env names) for runners not yet surveyed.
 
-## 7. Tier 2 — best-effort in-process heuristics (no env)
+## 7. Tier 2 — runner-owned evidence and ancestry (implemented)
 
-Evaluated only when Tier 1 is negative and the new knob is engaged. Any single positive ⇒ subagent (OR semantics), each fails closed on exception:
+Evaluated only when Tier 1 is negative. Each probe is guarded, so a stale or unfamiliar `ctx` cannot throw; a false negative keeps memory on.
 
-1. `session_start` event `reason === "fork"` (ESSO; nicobailon uses `"startup"` — do not generalize).
-2. `parentSession` session-file header set and pointing at a different session file (nicobailon foreground, gotgenes).
-3. Known in-process manager registries present AND own sessionId listed: `Symbol.for("pi-subagents:manager")` (tintinweb, ESSO variants) / gotgenes `Symbol.for()` service / `subagents:child:*` lifecycle events.
-4. Loader extension paths/names match a known spawner (`pi-subagents`, `tintinweb-pi-subagents`, `pi-subagent`, `gentle-agents`, `pi-better-subagents`, `<inline:pi-subagents:…>`, `child-steer.ts`, `subagent-done.ts`) while the current session is not the carrier session.
-5. `isPersisted() === false` **combined with** one of 1–4 or the bacnh85 settings combo (compaction disabled + `retry.maxRetries===1`) — never standalone.
-6. Session-file location markers (persisted children): path under `<parent>.subagents/` + sibling `manifest.jsonl` (dnouri); first message contains `<subagent-context>` (dnouri); branch custom entries `pi-subagent:thread:v1` / `pi-subagent:registry:v1` with `rootSessionId` match (championswimmer).
-7. Loader/tool-shape markers (detached opt-in children): `-e …child-communication-bridge…` + `subagent_send`/`subagent_wait` present without `subagent_spawn` (narumiruna); child inventory is builtins + allowlisted subset with the spawner absent via its own early-return (AlexParamonov-lite).
-8. No-gating-needed postures (blackhole absent by construction — detection is parent-side confirmation only): pifydev/subagent (`noExtensions:true` unconditional); narumiruna default jobs (zero non-bridge extensions); championswimmer default (`subagentExtensions=false`).
+1. **Runner-owned custom entry types** in the session branch: `pi-subagent:thread:v1` (championswimmer), `pi-herdsman-agent-definition` (herdsman).
+2. **Session-file locations:** `<name>.subagents/<child>.jsonl` (pi-submarine), `.pi-worktrees/<name>/` (@bacnh85).
+3. **Fork reason:** `reason === "fork"` + `isPersisted() === false` + id not a known root (ESSO). A persisted manual `/fork` is a main session, handled as `session:manual_fork`.
+4. **Generic ancestry (the workhorse):** every main session registers its id in `PI_BLACKHOLE_ROOT_SESSIONS` and in module state at `session_start`. Any session with a different id is a child, whether in-process or detached, as long as it inherited the env. This covers marker-less in-process runners including lean/tintinweb, ESSO, gotgenes and submarine with no per-runner table entry.
 
-`hasUI`, bare `isPersisted()===false`, session-name patterns, and worktree/sibling dirs are corroboration only.
+Deliberately not used:
 
-## 8. Config knob sketch (to be iterated — NOT final)
+- `parentSession` header — manual `/fork` and `/new` set it too, so it is not subagent-specific.
+- Loader/tool-shape and in-process registry heuristics from the draft — ancestry covers in-process children and env markers cover detached ones. They remain fallbacks for a runner that strips env.
+- Bare `isPersisted() === false`, `hasUI` and session-name patterns — corroboration only.
 
-- Candidate shape: `subagentMemory: "off" | "inherit"` (default `"off"`), or minimal boolean `disableMemoryForSubagents` (default `true`). Covers OM workers + OM injection; compaction in children keeps flowing to pi-native (`compactionEngine: pi-default` equivalent) rather than being forced off.
-- Env: `PI_BLACKHOLE_SUBAGENT_MEMORY` (`off|inherit`, case-insensitive); extra markers `PI_BLACKHOLE_SUBAGENT_MARKERS` (comma list). File + settings-modal + env must agree (docs-consistency rule, §3.6).
-- Precedence sketch (to confirm in design): explicit `PI_BLACKHOLE_MEMORY=false` ⇒ off everywhere (unchanged); Tier-1/2 positive + knob `off` ⇒ memory off for that session even if file says `true`; knob `inherit` ⇒ detection runs but does not gate (log-only); explicit `PI_BLACKHOLE_MEMORY=true` in a detected child ⇒ ??? (open: declarative map currently wins over passive — decide whether child-gate outranks it; Skelectric's double-set suggests users expect off to win).
-- Gating points (per-event, no `runtime.config` writes): `maybeLaunchConsolidation` early return (`src/om/consolidation.ts:612-625` region) + `autoCompactionSkipReason` pi-default equivalence (`src/om/compaction-trigger.ts:87-102`) + status-bar O/P gauge suppression follows the existing `memory` gate. New `isSubagentSession(ctx)` helper (e.g. `src/core/subagent-detect.ts`), pure `(env, ctx)` ⇒ `{isSubagent, reason}` for testability and `debugLog("subagent.skip", …)` + one per-session info toast.
+Known limitations: a new main session in the same process is misdetected as a child if it emits an OM event before its own `session_start` (nothing has registered its new id yet); a `session_start` with reason `new` is handled explicitly. Detached runners that build a clean env without inheriting `PI_BLACKHOLE_ROOT_SESSIONS` need a Tier-1 marker or `PI_BLACKHOLE_SUBAGENT_MARKERS`.
 
-## 9. Deferred / rejected (for now)
+## 8. Implemented design
+
+### 8.1 Knob and config
+
+`subagentMemory: "off" | "inherit"`, default `"off"`. It covers OM workers and OM content injection; compaction is untouched, so children keep whatever `compactionEngine` their config resolves to.
+
+| Surface        | Behavior                                                                                                             |
+| -------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Config file    | `subagentMemory` accepted as `off`/`inherit`, case-insensitive; invalid values are ignored at load and on modal save |
+| Settings modal | enum field "Subagent observational memory"                                                                           |
+| Env            | `PI_BLACKHOLE_SUBAGENT_MEMORY` (`off`/`inherit`, case-insensitive), declarative override of the file                 |
+| Extra markers  | `PI_BLACKHOLE_SUBAGENT_MARKERS` (comma-separated env names) for unsupported runners                                  |
+| Example config | `"subagentMemory": "off"` (completeness test enforces DEFAULTS parity)                                               |
+
+`memory: false` remains the global kill switch: it disables OM everywhere regardless of `subagentMemory`.
+
+### 8.2 Detection and gating internals
+
+- `src/core/subagent-detector.ts` is the single decision point: `detectSubagentSession(probe) => {isSubagent, reason}`, `probeFromContext(ctx, start)` with every accessor guarded, the root registry (`registerRootSession` / `unregisterRootSession` / `resetSubagentDetectorState`), and `normalizeSubagentMemoryMode`.
+- `Runtime.noteSessionStart(ctx, event)` decides once at `session_start`, caches per session id, and registers main ancestry. `Runtime.getSubagentDecision(ctx)` lazily probes and self-heals a missing `session_start` for main sessions.
+- `Runtime.isMemoryEnabled(ctx, config)` is the gate. It reads the _current_ config and the per-session decision; it never writes `runtime.config`, because in-process children share one Runtime with the parent.
+- Gating points: `maybeLaunchConsolidation` (before any worker), `observeTailOnShutdown`, both OM-injection sites in `before-compact.ts`, and the status-bar O/P gauges. `handleAgentEnd` debug output reports the effective value. Compaction scheduling is not gated.
+- `noteSubagentMemorySkip` writes one `subagent.memory_skipped` debug record per session (reason included) when `debugLog` is on; there is no toast.
+
+### 8.3 Precedence (resolved)
+
+| Situation                                         | Result                                                                                               |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Main session, any knob                            | OM follows `memory` (unchanged)                                                                      |
+| Detected child, `subagentMemory: "off"` (default) | OM off, even if `memory` resolved to `true` (including an inherited `PI_BLACKHOLE_MEMORY=true`)      |
+| Detected child, `subagentMemory: "inherit"`       | OM follows the child's resolved `memory`; an explicit `PI_BLACKHOLE_MEMORY=true` in that child works |
+| Any session, `memory: false`                      | OM off everywhere                                                                                    |
+| Child wants in under the default                  | Set `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit` (or config `inherit`) for that child                      |
+
+The chosen rule is "knob wins under `off`": it makes the default guarantee robust against parents that export `PI_BLACKHOLE_MEMORY=true` wholesale, which is the failure Skelectric's guard worked around. The cost is that a child cannot opt in with `PI_BLACKHOLE_MEMORY=true` alone; the opt-in is the one documented knob.
+
+### 8.4 False-positive posture
+
+Unknown sessions are treated as main, so a detection miss costs tokens rather than silently disabling the user's own memory. A false positive (main session treated as a child) is the expensive failure; the ancestry marker is only written by the main session itself, and `session_start` reason `new`/`fork` breaks ties before the root-mismatch rule. The residual case is documented in §7 (event before `session_start`).
+
+## 9. Deferred / rejected
 
 - Docs-only alone (rejected as sole fix — doesn't change defaults).
-- `--blackhole-om off` CLI flag (deferred — only helps flag-forwarding runners; env contract covers more).
+- `--blackhole-om off` CLI flag (deferred — only helps flag-forwarding runners; the env/knob contract covers more).
 - Subagent-optimized pipeline / downscaled thresholds (deferred — still burns tokens for a 1.35% hit rate; revisit if long-subagent use appears).
 - Parent-side harvesting of subagent transcripts via project-recall corpus/orphan attribution (`src/project-recall/corpus.ts`) — noted as the async recovery path, not a substitute for stopping inline waste.
-- `compaction: off` forcing in children (rejected sketch — children still benefit from pi-native compaction; gate OM, not compaction).
+- `compaction: off` forcing in children (rejected — children still benefit from pi-native compaction; gate OM, not compaction).
+- Per-runner recipes in CONFIG.md (not required for the default; the extra-markers env covers unsupported runners).
 
-## 10. Verification sketch (to be iterated)
+## 10. Verification
 
-- Unit tests per AGENTS.md T1–T8 (red-first while writing, branch coverage incl. empty vs populated marker values, cleanup in finally/after-hooks, mocks matching real `ctx.sessionManager`/`loader` shapes, no `any` escapes): Tier-1 each marker; Tier-2 fork/registry/header/loader paths; negatives (plain inMemory session, unset/empty markers); precedence (inherit wins, explicit memory=false everywhere); per-event gating leaves `runtime.config` unmutated for the parent.
-- Manual: `debugLog` on; one in-process runner (tintinweb or ESSO0428) + one detached runner (edxeth or gentle-shell); confirm `subagent.skip` with reason, zero observer/reflector/dropper calls in the child, parent pipeline unaffected; `/blackhole-memory status` surfaces skips.
-- Docs check: `pnpm check` + README/CONFIG/llms.txt default parity.
+- Unit tests (54 across `tests/subagent-detector.test.ts`, `tests/subagent-memory-config.test.ts`, `tests/subagent-memory-gating.test.ts`): every Tier-1 marker (including falsey tokens and `HERDR=off`), custom entry types, session-path markers, fork persisted vs in-memory, ancestry registration/cache/self-heal, extra markers env, config file/env/default parity, precedence (`off` beats `memory: true`; `inherit` follows it; `memory: false` always wins), and no `runtime.config` mutation while gating a child.
+- Full suite green: 174 files / 3,285 tests. `pnpm typecheck`, `pnpm lint`, `pnpm format:check` must pass before commit.
+- Manual soak (still required): `debugLog` on; one in-process runner (tintinweb or lean) + one detached runner (edxeth or gentle-shell); confirm `subagent.memory_skipped` with reason, zero observer/reflector/dropper calls in the child, parent pipeline unaffected. **Do not build or execute the surveyed subagent extensions.**
+- Docs check: README / `docs/CONFIG.md` / `llms.txt` mirror `DEFAULTS.subagentMemory = "off"`; CHANGELOG has an Unreleased entry.
 
-## 11. Open questions (iteration entry points)
+## 11. Open questions
 
-1. Knob name/scope: `subagentMemory` (OM-only) vs `subagentBehavior: off|memory-off|inherit` (also compaction)? Current lean: OM-only.
-2. Does explicit `PI_BLACKHOLE_MEMORY=true` in a detected child outrank the child-gate? (Passive-vs-declarative ordering question from §1.)
-3. Should Tier 2 be on by default, or Tier-1-only by default with Tier 2 opt-in (`PI_BLACKHOLE_SUBAGENT_MARKERS` / `subagentDetect: strict|lax`)? False-positive cost is a silently memory-less session.
-4. Where does `isSubagentSession` get its `ctx` shape guarantee across pi versions (loader listing API, `session_start` reason values, `Symbol.for` registries are all unversioned)?
-5. Do we need per-runner recipes in CONFIG.md immediately (option 3 docs, §1 workaround 1), or wait for the knob?
+1. ~~Knob name/scope~~ — resolved: `subagentMemory`, OM-only.
+2. ~~Does explicit `PI_BLACKHOLE_MEMORY=true` in a detected child outrank the gate?~~ — resolved: no under `off`; `inherit` is the opt-in (§8.3).
+3. ~~Tier 2 default?~~ — resolved: ancestry + runner evidence are always on; they only run when Tier 1 is negative.
+4. `ctx` shape across pi versions (`getEntries`, `session_start` reasons) is unversioned; every accessor is guarded and unknown shapes fail open to "main".
+5. Nested/detached runners that construct a clean env instead of inheriting it need a Tier-1 marker or `PI_BLACKHOLE_SUBAGENT_MARKERS`; revisit if a popular runner does this.
+6. `project-recall` and export still ingest completed subagent sessions; whether that should also be scoped is a separate decision (not part of this knob).
