@@ -196,7 +196,7 @@ GENTLE_PI_AGENTS_OWNED_IPC (confirming, gentle-shell)
 PI_SUBAGENT_DEPTH (narumiruna — persists; nesting guard, read at factory top-level)
 ```
 
-`PI_SUBAGENT_HERDR` is accepted only when its value is not `off`/`0`/`false`, because `@bacnh85/pi-subagent` sets `off` in children to disable its herdr tool. `PI_SUBAGENT_DEPTH` is accepted only when it parses to `> 0`. Everything else uses the shared truthy rule (non-empty, not `0`/`false`/`no`/`off`).
+`PI_SUBAGENT_HERDR` is accepted unless its value is empty, `0` or `false`; `off` counts as a child marker, because `@bacnh85/pi-subagent` sets `off` in children to disable its herdr tool. `PI_SUBAGENT_DEPTH` is accepted only when it parses to `> 0`. Everything else uses the shared truthy rule (non-empty, not `0`/`false`/`no`/`off`).
 
 Env present-but-unreliable (do NOT gate on these alone): `PI_SUBAGENT_BROKER_FD` / `PI_SUBAGENT_READINESS_FD` (deleted on import, visible only very early). `PI_SUBAGENT_HERDR` is reliable but herdr-path-only.
 
@@ -259,7 +259,7 @@ The chosen rule is "knob wins under `off`": it makes the default guarantee robus
 
 ### 8.4 False-positive posture
 
-Unknown sessions are treated as main, so a detection miss costs tokens rather than silently disabling the user's own memory. A false positive (main session treated as a child) is the expensive failure; the ancestry marker is only written by the main session itself, and `session_start` reason `new`/`fork` breaks ties before the root-mismatch rule. The residual case is documented in §7 (event before `session_start`).
+Unknown sessions are treated as main, so a detection miss costs tokens rather than silently disabling the user's own memory. A false positive (main session treated as a child) is the expensive failure; the ancestry marker is only written by the main session itself, and `session_start` reason `new`/`resume` plus persisted `fork` break ties before the root-mismatch rule. The root registry is pruned on `session_shutdown` (reload excepted) so a dead session id cannot misclassify a later main session in the same host. A manually resumed child without positive child evidence runs OM; that false negative is accepted because `/resume` cannot distinguish it from a resumed main session. The residual case is documented in §7 (event before `session_start`).
 
 ## 9. Deferred / rejected
 
@@ -272,8 +272,8 @@ Unknown sessions are treated as main, so a detection miss costs tokens rather th
 
 ## 10. Verification
 
-- Unit tests (54 across `tests/subagent-detector.test.ts`, `tests/subagent-memory-config.test.ts`, `tests/subagent-memory-gating.test.ts`): every Tier-1 marker (including falsey tokens and `HERDR=off`), custom entry types, session-path markers, fork persisted vs in-memory, ancestry registration/cache/self-heal, extra markers env, config file/env/default parity, precedence (`off` beats `memory: true`; `inherit` follows it; `memory: false` always wins), and no `runtime.config` mutation while gating a child.
-- Full suite green: 174 files / 3,285 tests. `pnpm typecheck`, `pnpm lint`, `pnpm format:check` must pass before commit.
+- Unit tests (59 across `tests/subagent-detector.test.ts`, `tests/subagent-memory-config.test.ts`, `tests/subagent-memory-gating.test.ts`): every Tier-1 marker (including falsey tokens and `HERDR=off`), custom entry types, session-path markers, fork persisted vs in-memory, resume main vs positive child evidence, ancestry registration/cache/self-heal/teardown (reload excepted), extra markers env, config file/env/default parity, precedence (`off` beats `memory: true`; `inherit` follows it; `memory: false` always wins), and no `runtime.config` mutation while gating a child.
+- Full suite green: 174 files / 3,293 tests. `pnpm typecheck`, `pnpm lint`, `pnpm format:check` must pass before commit.
 - Manual soak (still required): `debugLog` on; one in-process runner (tintinweb or lean) + one detached runner (edxeth or gentle-shell); confirm `subagent.memory_skipped` with reason, zero observer/reflector/dropper calls in the child, parent pipeline unaffected. **Do not build or execute the surveyed subagent extensions.**
 - Docs check: README / `docs/CONFIG.md` / `llms.txt` mirror `DEFAULTS.subagentMemory = "off"`; CHANGELOG has an Unreleased entry.
 

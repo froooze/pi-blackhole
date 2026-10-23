@@ -109,10 +109,9 @@ describe("session evidence", () => {
     expect(decision.reason).toBe("entry:pi-herdsman-agent-definition");
   });
 
-  it("does not treat a parentSession header as subagent-only (manual forks set it too)", () => {
+  it("does not treat an ordinary persisted session file as a subagent path", () => {
     const decision = detectSubagentSession(
       probe({
-        parentSession: "/sessions/parent.jsonl",
         sessionFile: "/sessions/child.jsonl",
       }),
     );
@@ -195,6 +194,36 @@ describe("fork ambiguity", () => {
       }),
     );
     expect(decision.isSubagent).toBe(false);
+    expect(decision.reason).toBe("session:new_root");
+  });
+});
+
+describe("resume ambiguity", () => {
+  it("treats a resumed main session as a root when its id is absent from the registry", () => {
+    const decision = detectSubagentSession(
+      probe({
+        sessionId: "resumed-main",
+        rootSessionIds: ["root-1"],
+        sessionStartReason: "resume",
+        isPersisted: true,
+      }),
+    );
+    expect(decision.isSubagent).toBe(false);
+    expect(decision.reason).toBe("session:resumed_root");
+  });
+
+  it("still gates a resumed session with positive child evidence", () => {
+    const decision = detectSubagentSession(
+      probe({
+        sessionId: "resumed-child",
+        rootSessionIds: ["root-1"],
+        sessionStartReason: "resume",
+        isPersisted: true,
+        env: { PI_SUBAGENT_CHILD: "1" },
+      }),
+    );
+    expect(decision.isSubagent).toBe(true);
+    expect(decision.reason).toBe("env:PI_SUBAGENT_CHILD");
   });
 });
 
@@ -225,14 +254,6 @@ describe("root registry", () => {
     registerRootSession("root-1", env);
     unregisterRootSession("root-1", env);
     expect(env[ROOT_SESSIONS_ENV]).toBeUndefined();
-  });
-
-  it("registerRootSession refuses to hijack an inherited root list for a child", () => {
-    const env: Record<string, string | undefined> = {};
-    registerRootSession("root-1", env);
-    // A child session must not be registered by the caller; the detector is the
-    // guard. This test pins the low-level behavior used by the caller.
-    expect(readRootSessionIds(env)).toEqual(["root-1"]);
   });
 });
 

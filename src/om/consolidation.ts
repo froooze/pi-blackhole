@@ -650,7 +650,14 @@ export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime)
     // children spawned later. Gating itself stays per-event (see isMemoryEnabled).
     runtime.noteSessionStart(ctx as unknown as SubagentContextLike, event);
   });
-  pi.on("session_shutdown", (event, ctx) => observeTailOnShutdown(pi, runtime, ctx, event.reason));
+  pi.on("session_shutdown", (event, ctx) => {
+    // Start the observer first: it reads the per-session memory decision
+    // synchronously. Then drop the ending session's ancestry id so a later
+    // main session in this host cannot be mistaken for a child.
+    const observing = observeTailOnShutdown(pi, runtime, ctx, event.reason);
+    runtime.noteSessionShutdown(ctx as unknown as SubagentContextLike, event.reason);
+    return observing;
+  });
   const launch = (_event: unknown, ctx: ConsolidationCtx) => {
     maybeLaunchConsolidation(pi, runtime, ctx);
   };

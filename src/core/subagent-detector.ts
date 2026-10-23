@@ -19,6 +19,9 @@
  *  4. `fork` reason is ambiguous: a user `/fork` is a new main session, while a
  *     forked subagent runs on an in-memory session. Persisted fork => main,
  *     non-persisted fork => child.
+ *  5. `resume` is ambiguous: `/resume` can load a main session or a session
+ *     that was created as a child. Positive child evidence above still wins;
+ *     otherwise a resumed session is main.
  *
  * Unknown sessions fail closed (treated as main), so a false negative costs
  * tokens but never silently disables memory for the user's own session.
@@ -91,6 +94,17 @@ export const SUBAGENT_CUSTOM_ENTRY_TYPES: readonly { type: string; runner: strin
   { type: "pi-subagent:thread:v1", runner: "pi-subagent-manager" },
   { type: "pi-herdsman-agent-definition", runner: "pi-herdsman" },
 ];
+
+/**
+ * Session-start reasons that create a root unless positive child evidence was
+ * found first. `fork` is only reached here when it was persisted or is a known
+ * root (the in-memory subagent fork is handled earlier).
+ */
+const ROOT_SESSION_START_REASONS: Partial<Record<SubagentStartReason, string>> = {
+  new: "session:new_root",
+  resume: "session:resumed_root",
+  fork: "session:manual_fork",
+};
 
 export interface SubagentProbe {
   env?: Readonly<Record<string, string | undefined>>;
@@ -271,14 +285,10 @@ export function detectSubagentSession(probe: SubagentProbe): SubagentDecision {
 
   const roots = collectRootSessionIds(probe.rootSessionIds, env);
   if (probe.sessionId && roots.size > 0 && !roots.has(probe.sessionId)) {
-    // A /new session in the same process is a new root, not a child.
-    if (probe.sessionStartReason === "new") {
-      return { isSubagent: false, reason: "session:new_root" };
-    }
-    // /fork (manual) is persisted; a subagent fork was handled above.
-    if (probe.sessionStartReason === "fork") {
-      return { isSubagent: false, reason: "session:manual_fork" };
-    }
+    const rootReason = probe.sessionStartReason
+      ? ROOT_SESSION_START_REASONS[probe.sessionStartReason]
+      : undefined;
+    if (rootReason) return { isSubagent: false, reason: rootReason };
     return { isSubagent: true, reason: "session:root_ancestor_mismatch" };
   }
 

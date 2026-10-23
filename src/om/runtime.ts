@@ -27,7 +27,7 @@ import {
 } from "./retryable-error.js";
 import { readPendingCursors, writePendingCursors } from "./pending.js";
 import type { PendingOMState } from "./pending.js";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { ModelRegistry, SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
 import type { AuthResult } from "@earendil-works/pi-ai";
 import { debugLog } from "./debug-log.js";
 import {
@@ -35,6 +35,7 @@ import {
   isSubagentMemoryDisabled,
   probeFromContext,
   registerRootSession,
+  unregisterRootSession,
   type SubagentContextLike,
   type SubagentDecision,
   type SubagentStartReason,
@@ -382,6 +383,23 @@ export class Runtime {
       this.config.debugLog === true,
     );
     return decision;
+  }
+
+  /**
+   * Drop the ending session's ancestry id so a later main session in the same
+   * host cannot be misread as a child. Reload keeps the id: the same session
+   * continues and its `session_start` reason is "reload".
+   */
+  noteSessionShutdown(
+    ctx: SubagentContextLike | undefined,
+    reason: SessionShutdownEvent["reason"],
+  ): void {
+    if (reason === "reload") return;
+    const sessionId = this.sessionIdOf(ctx);
+    if (!sessionId) return;
+    this.subagentDecisions.delete(sessionId);
+    this.subagentSkipLogged.delete(sessionId);
+    unregisterRootSession(sessionId);
   }
 
   /** Cached per-session decision, probing on first use if session_start missed it. */

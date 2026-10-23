@@ -562,6 +562,16 @@ export const config = new ConfigManager<UnifiedConfig>({
         );
       }
     }
+    const envSubagentMemory = process.env.PI_BLACKHOLE_SUBAGENT_MEMORY;
+    if (
+      envSubagentMemory !== undefined &&
+      envSubagentMemory.trim() !== "" &&
+      normalizeSubagentMemoryMode(envSubagentMemory) === undefined
+    ) {
+      console.warn(
+        `blackhole: invalid PI_BLACKHOLE_SUBAGENT_MEMORY value "${envSubagentMemory}"; ignoring`,
+      );
+    }
 
     // ── Threshold knobs: same scrubber the file loader uses ──
     // 0 means "not set", out-of-range values are dropped, legacy 81000

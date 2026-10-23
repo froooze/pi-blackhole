@@ -908,6 +908,18 @@ export function loadUnifiedConfig(cwd: string, onWarn?: WarnFn): UnifiedConfig {
     }
   }
 
+  // ── Env override — subagent memory ──
+  const envSubagentMemory = process.env.PI_BLACKHOLE_SUBAGENT_MEMORY;
+  if (
+    envSubagentMemory !== undefined &&
+    envSubagentMemory.trim() !== "" &&
+    normalizeSubagentMemoryMode(envSubagentMemory) === undefined
+  ) {
+    console.warn(
+      `blackhole: invalid PI_BLACKHOLE_SUBAGENT_MEMORY value "${envSubagentMemory}"; ignoring`,
+    );
+  }
+
   // ── Declarative PI_BLACKHOLE_* overrides ──
   // Same env map as the ConfigManager modal path, so env overrides apply
   // to the RUNTIME config, not just the modal. Overrides any file value.

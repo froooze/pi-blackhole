@@ -552,7 +552,7 @@ These override config file values at load time, applied AFTER config is parsed. 
 | `PI_BLACKHOLE_SUBAGENT_MEMORY` | Overrides `subagentMemory` | `off`, `inherit` |
 | `PI_BLACKHOLE_SUBAGENT_MARKERS` | Extra env names that mark a session as a subagent | comma-separated names |
 
-`subagentMemory` defaults to `"off"`: OM workers and OM injection are skipped in detected subagent sessions, while compaction is unaffected. Under `"off"`, an inherited `PI_BLACKHOLE_MEMORY=true` does not re-enable children; use `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit` for a per-child opt-in. `memory: false` still disables OM everywhere.
+`subagentMemory` defaults to `"off"`: OM workers and OM injection are skipped in detected subagent sessions, while compaction is unaffected. Under `"off"`, an inherited `PI_BLACKHOLE_MEMORY=true` does not re-enable children; use `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit` for a per-child opt-in. `memory: false` still disables OM everywhere. A resumed session is treated as main unless a positive child signal is present, and the ancestry registry is pruned at session shutdown (reload excepted).
 
 Legacy aliases (still work): `PI_VCC_OM_PASSIVE`, `PI_OBSERVATIONAL_MEMORY_PASSIVE`.
 

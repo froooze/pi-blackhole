@@ -80,8 +80,21 @@ describe("subagentMemory from env", () => {
   it("an invalid env value is ignored", async () => {
     writeConfig({ subagentMemory: "inherit" });
     process.env[ENV_KEY] = "nope";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
     expect(loadUnifiedConfig(testDir).subagentMemory).toBe("inherit");
+    expect(warn).toHaveBeenCalledWith(
+      'blackhole: invalid PI_BLACKHOLE_SUBAGENT_MEMORY value "nope"; ignoring',
+    );
+  });
+
+  it("does not warn for an empty env value", async () => {
+    writeConfig({ subagentMemory: "inherit" });
+    process.env[ENV_KEY] = "   ";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { loadUnifiedConfig } = await import("../src/core/unified-config.js");
+    expect(loadUnifiedConfig(testDir).subagentMemory).toBe("inherit");
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("PI_BLACKHOLE_SUBAGENT_MEMORY"));
   });
 
   it("PI_BLACKHOLE_MEMORY=true does not re-enable memory for subagents", async () => {
