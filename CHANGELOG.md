@@ -2,7 +2,7 @@
 
 ### Fixed
 
-- **The last assistant output stays visible after compaction.** Compaction truncates prior conversation from view, which could also hide the last answer or approval question. The display-only copy is now restored; model context and retention are unchanged.
+- **`showPreCompactionMessage` works again after compaction.** The handler scanned the session path in the wrong direction, so the display-only copy was never appended and the last answer or approval question disappeared with the truncated history. It now finds the newest dropped assistant text; model context and retention are unchanged.
 
 ---
 

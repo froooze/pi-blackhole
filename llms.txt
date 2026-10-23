@@ -242,7 +242,7 @@ The interaction matrix:
 
 Both `/blackhole` and auto-triggered default to `"minimal"`. Set explicitly to `"pi-default"` for a gentler cut.
 
-`showPreCompactionMessage` (default `true`) is the visual companion to the cut: after a successful blackhole compaction, blackhole appends a **display-only** copy of the newest assistant output the cut removed, so the terminal keeps showing the answer instead of jumping straight to the compaction card. It is a plain `custom` session entry — never sent to the model, never a memory source, and it leaves the cut, summary, and threshold untouched. Cap: 16 KiB, text only (no tool output, thinking, or images). Nothing is copied when the newest dropped text is already retained.
+`showPreCompactionMessage` (default `true`) is the visual companion to the cut: after a successful blackhole compaction, blackhole appends a **display-only** copy of the newest assistant output the cut removed, so the terminal keeps showing the answer instead of jumping straight to the compaction card. It is a plain `custom` session entry — never sent to the model, never a memory source, and it leaves the cut, summary, and threshold untouched. Cap: 16 KiB, text only (no tool output, thinking, or images). Retained answers are never copied: the newest answer the cut actually dropped is used instead, and nothing is copied when everything the cut hid is retained.
 
 **User-facing statement:**
 
