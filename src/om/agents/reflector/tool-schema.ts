@@ -5,7 +5,7 @@
  * of truth: the agent builds its tool from these same objects.
  */
 import { Type } from "typebox";
-import type { Static } from "typebox";
+import type { Static, TSchema } from "typebox";
 
 // Compose both schemas from these shared fields. Reading `.properties` back
 // from a built schema throws on hosts that shim typebox (omp).
@@ -26,20 +26,23 @@ const completeField = Type.Optional(
   }),
 );
 
-export const RecordReflectionsSchema = Type.Object({
-  reflections: Type.Array(Type.Object(reflectionItemFields), { minItems: 1 }),
-  complete: completeField,
-});
+// The object skeleton is built in one place so a top-level field can never
+// exist in only one of the two schemas. The item fields differ per schema:
+// the supersedes variant adds its optional field after the shared ones.
+function reflectorObjectFields<F extends Record<string, TSchema>>(itemFields: F) {
+  return {
+    reflections: Type.Array(Type.Object(itemFields), { minItems: 1 }),
+    complete: completeField,
+  };
+}
 
-export const RecordReflectionsWithSupersedesSchema = Type.Object({
-  reflections: Type.Array(
-    Type.Object({
-      ...reflectionItemFields,
-      supersedes: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-    }),
-    { minItems: 1 },
-  ),
-  complete: completeField,
-});
+export const RecordReflectionsSchema = Type.Object(reflectorObjectFields(reflectionItemFields));
+
+export const RecordReflectionsWithSupersedesSchema = Type.Object(
+  reflectorObjectFields({
+    ...reflectionItemFields,
+    supersedes: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  }),
+);
 
 export type RecordReflectionsArgs = Static<typeof RecordReflectionsWithSupersedesSchema>;

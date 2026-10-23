@@ -160,8 +160,8 @@ describe("composed reflector schemas match the old formulation", () => {
     expect(descriptorTree(RecordReflectionsSchema)).toEqual(descriptorTree(oldBaseSchema));
   });
 
-  // The two schemas now duplicate their top-level shape (the old spread cannot
-  // run on callable hosts), so a field added to one must be added to the other.
+  // The shared builder owns the top-level shape. These pin the built output so
+  // a schema that stops using it, or diverges on item fields, fails here.
   test("both schemas expose the same top-level fields", () => {
     expect(Object.keys(RecordReflectionsWithSupersedesSchema.properties)).toEqual(
       Object.keys(RecordReflectionsSchema.properties),
