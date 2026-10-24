@@ -593,6 +593,8 @@ describe("Consolidation trigger — guards with new config keys", () => {
     const mockController = new AbortController();
     const runtime = {
       ensureConfig: vi.fn(),
+      isMemoryEnabled: vi.fn(() => configOverrides.memory !== false),
+      noteSubagentMemorySkip: vi.fn(),
       resetInfoGate: vi.fn(),
       tryEmitInfo: vi.fn(),
       captureGeneration: vi.fn((identity: string | undefined) => ({

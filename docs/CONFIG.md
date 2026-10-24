@@ -46,6 +46,7 @@ The config file must contain **valid JSON**. A trailing comma, partial write, or
 
   // ── Observational Memory ──
   "memory": true,                 // Enable OM workers + content injection
+  "subagentMemory": "off",        // "off" = no OM in detected subagents, "inherit" = follow memory
   "sessionFallback": true,        // Fall back to session model when OM models fail
   "reflectionTimestamps": true,  // Show reflection evidence time
   "reflectionSupersedes": false, // Replacement notes; replaced reflections leave compaction output
@@ -192,7 +193,7 @@ Default `true`. After a successful Blackhole compaction, append a display-only c
 
 The copy is **cosmetic**: Pi renders the entry but never sends it to the model (`sessionEntryToContextMessages` returns nothing for plain `custom` entries), and Blackhole's own serializers only read `message`, `custom_message`, and `branch_summary` entries. It does not change `firstKeptEntryId`, the summary, or the auto-compaction threshold.
 
-When the newest dropped message is already retained by the cut (the common `minimal` case, where the last user turn and everything after it stay visible), nothing is copied — no duplicates. Compact-all with no retained tail copies the final answer instead.
+When the newest answer is already retained by the cut (the common `minimal` case, where the last user turn and everything after it stay visible), the newest answer the cut actually dropped is copied instead — retained entries are never duplicated. When everything the cut hid is retained, nothing is copied. Compact-all with no retained tail copies the final answer.
 
 Things that stay out of the copy: tool output, thinking blocks, images, and exact card layout. The copy is truncated at 16 KiB with a `[Copy truncated]` marker; each eligible compaction adds one entry to the session file (a bounded disk and redraw cost, not a token cost).
 
@@ -398,6 +399,26 @@ Controls whether observational memory workers run and whether OM content is inje
 
 // Compaction only, no OM workers
 { "memory": false, "compaction": "auto", "compactionEngine": "blackhole" }
+```
+
+### `subagentMemory`
+
+Controls observational memory in sessions detected as subagents. Compaction is unaffected: children keep whatever `compactionEngine` their config resolves to.
+
+| Value | Behavior |
+|-------|----------|
+| `"off"` | No OM workers and no OM injection in detected children (default) |
+| `"inherit"` | Children follow the same `memory` value as the main session |
+
+Detection is centralized in `src/core/subagent-detector.ts`: runner env markers (`PI_SUBAGENT_*`, `GENTLE_PI_AGENTS_*`), runner-owned session paths/custom entries, in-memory `fork`, and a generic ancestry marker (`PI_BLACKHOLE_ROOT_SESSIONS`) that every main session registers for its children. Unknown sessions are treated as main. `/resume` is ambiguous: a resumed session is treated as main unless a positive child signal is present. The ancestry registry is pruned at session shutdown (reload excepted) so a later main session in the same host is not mistaken for a child. For an unsupported runner, list extra env names in `PI_BLACKHOLE_SUBAGENT_MARKERS` (comma-separated).
+
+Full mechanism, decision order, known blind spots and debugging: [subagent-detection.md](subagent-detection.md).
+
+Precedence: `memory: false` still disables OM everywhere. Under `"off"`, a detected child stays off even if an inherited `PI_BLACKHOLE_MEMORY=true` resolved `memory` to true; to opt one child back in, set `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit` (or the config value) for that child. Set `PI_BLACKHOLE_SUBAGENT_MEMORY=off` to force the default when the file says `inherit`.
+
+```jsonc
+{ "subagentMemory": "off" }      // default: no OM in subagents
+{ "subagentMemory": "inherit" }  // run OM in subagents too
 ```
 
 ### `sessionFallback`
@@ -648,7 +669,7 @@ A thinking-only entry (`{ "thinking": "low" }`, no `provider`/`id`) is never tri
 
 ### `statusBar`
 
-Show the footer status bar: three token gauges — O (transcript since last observer run), P (observation pool fill), X (context since last compaction) — plus worker spinners and `✓ +N` completion events. O and P render only while [`memory`](#memory) is `true`: with observational memory disabled the pipeline hard-returns before any observer runs, so a filling gauge would imply a note-taking pass that is never due. The gauges return on the next render after `/blackhole om-on` re-enables memory.
+Show the footer status bar: three token gauges — O (transcript since last observer run), P (observation pool fill), X (context since last compaction) — plus worker spinners and `✓ +N` completion events. O and P render only while [`memory`](#memory) is `true`: with observational memory disabled the pipeline hard-returns before any observer runs, so a filling gauge would imply a note-taking pass that is never due. The gauges return on the next render after `/blackhole om-on` re-enables memory. If the host theme cannot be read or throws while formatting, the footer falls back to plain text for that render and colors resume on the next render that succeeds; Blackhole does not initialize or replace the host theme.
 
 | Type | Default |
 |------|---------|
@@ -725,6 +746,18 @@ Boolean fields:
 | `PI_BLACKHOLE_FULL_FOLD_ALWAYS` | `fullFoldAlways` |
 | `PI_BLACKHOLE_STATUSBAR` | `statusBar` |
 | `PI_BLACKHOLE_SHOW_WORKER_NOTIFICATIONS` | `showWorkerNotifications` |
+
+Enum fields (case-insensitive; invalid values fall back):
+
+| Variable | Overrides |
+|----------|-----------|
+| `PI_BLACKHOLE_SUBAGENT_MEMORY` | `subagentMemory` (`off` \| `inherit`) |
+
+Subagent detection helper:
+
+| Variable | Effect |
+|----------|--------|
+| `PI_BLACKHOLE_SUBAGENT_MARKERS` | Comma-separated extra env var names; a truthy value marks the session as a subagent |
 
 Integer fields (invalid values fall back; `reflectionsPoolMaxTokens` also accepts `0` to disable its cap):
 

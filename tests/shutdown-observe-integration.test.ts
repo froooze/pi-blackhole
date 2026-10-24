@@ -23,6 +23,7 @@ import {
 import { Runtime } from "../src/om/runtime.js";
 import { registerConsolidationTrigger } from "../src/om/consolidation.js";
 import { readPendingState } from "../src/om/pending.js";
+import { resetSubagentDetectorState } from "../src/core/subagent-detector.js";
 import { createExtensionApiDouble } from "./fixtures/pi-extension-api.js";
 
 import { createScriptedStream } from "./fixtures/scripted-stream.js";
@@ -58,6 +59,10 @@ const turnEndHandlers: ExtensionHandler<TurnEndEvent, TurnEndEventResult>[] = []
 const handlers: ExtensionHandler<SessionShutdownEvent>[] = [];
 
 beforeEach(async () => {
+  // Vitest workers share process.env across test files. A previous file may
+  // have left root ancestry markers behind, which would make this file's fresh
+  // main sessions look like children.
+  resetSubagentDetectorState();
   providerCompletion = Promise.resolve();
   scratch.dir = mkdtempSync(join(tmpdir(), "shutdown-integration-"));
   manager = SessionManager.create(scratch.dir, scratch.dir);

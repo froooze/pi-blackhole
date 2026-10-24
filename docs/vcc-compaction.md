@@ -251,7 +251,7 @@ See [[config#Compaction settings#Tail behavior]] for configuration details.
 | Cut policy | Unchanged — `firstKeptEntryId`, summary, and threshold are untouched |
 | Size | 16 KiB UTF-8 cap (`[Copy truncated]` marker when hit), newest dropped assistant text only |
 | Content | Text only — no tool output, thinking, or images |
-| Duplicates | Skipped when the newest dropped text is already retained; skipped when the same compaction already has a copy |
+| Duplicates | Retained text is never copied — the newest text the cut actually dropped is used instead; skipped when the same compaction already has a copy |
 
 Cost per eligible compaction: one `getBranch()`/`buildContextEntries()` read, a bounded copy, and one small session-file append. No extra model call and no token cost. See [[config#Compaction settings#`showPreCompactionMessage`]] for the setting.
 

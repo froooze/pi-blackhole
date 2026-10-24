@@ -13,6 +13,7 @@ vi.mock("../src/om/debug-log.js", () => ({
   debugLog: vi.fn(),
 }));
 
+import { debugLog } from "../src/om/debug-log.js";
 import { registerStatusBar } from "../src/om/status-bar.js";
 import {
   OM_OBSERVATIONS_DROPPED,
@@ -101,6 +102,8 @@ function setup(configOverrides: Record<string, unknown> = {}): Harness {
       compactAfterTokens: 100_000,
       ...configOverrides,
     },
+    isMemoryEnabled: () => runtime.config.memory !== false,
+    noteSubagentMemorySkip: vi.fn(),
     consolidationInFlight: false,
     consolidationPhase: undefined,
   };
@@ -147,7 +150,254 @@ describe("status bar", () => {
     vi.useFakeTimers();
   });
   afterEach(() => {
+    vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  describe("uninitialized theme", () => {
+    // Pi exposes a truthy theme proxy even before initTheme() has run. Its
+    // property getter, not ctx.ui.theme itself, throws in a headless worker.
+    function unavailableTheme() {
+      return new Proxy(
+        { fg: (_style: string, text: string) => text },
+        {
+          get() {
+            throw new Error("Theme not initialized. Call initTheme() first.");
+          },
+        },
+      );
+    }
+
+    it("renders plain status when a UI bridge exposes an uninitialized theme", async () => {
+      const h = setup();
+      const ctx = {
+        ...h.ctx,
+        hasUI: true,
+        ui: { setStatus: h.setStatus, theme: unavailableTheme() },
+      };
+      await h.fire("session_start", {}, ctx);
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("does not throw from the idle timer when the theme becomes unavailable", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: { fg: (_style: string, text: string) => text },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      ui.theme = unavailableTheme();
+      expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+    });
+  });
+
+  describe("theme availability", () => {
+    it("renders plain status when the theme getter throws", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          throw new Error("Theme not initialized. Call initTheme() first.");
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("renders plain status when no theme is provided", async () => {
+      const h = setup();
+      await h.fire("session_start", {}, { ...h.ctx, ui: { setStatus: h.setStatus } });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("preserves the theme method receiver", async () => {
+      const h = setup();
+      const theme = {
+        prefix: "themed",
+        fg(style: string, text: string) {
+          return `${this.prefix}:${style}:${text}`;
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, ui: { setStatus: h.setStatus, theme } });
+      expect(h.lastStatus()).toContain("themed:success:bh");
+    });
+
+    it("binds fg to the proxy receiver", async () => {
+      // The installed host exposes `ui.theme` as a Proxy over the active Theme,
+      // so a method read through it must run with the proxy as `this`.
+      const theme: { fg: (style: string, text: string) => string } = new Proxy(
+        {
+          fg(style: string, text: string) {
+            return `${this === theme ? "proxy-receiver" : "wrong-receiver"}:${style}:${text}`;
+          },
+        },
+        { get: (target, prop, receiver) => Reflect.get(target, prop, receiver) },
+      );
+      const h = setup();
+      await h.fire(
+        "session_start",
+        {},
+        { ...h.ctx, hasUI: true, ui: { setStatus: h.setStatus, theme } },
+      );
+      expect(h.lastStatus()).toContain("proxy-receiver:success:bh");
+    });
+
+    it("renders plain status when the theme object has no fg yet", async () => {
+      // A bridge may hand out a partially built theme object: truthy, so the
+      // `t ? ...` branch is taken, but `fg` is still missing.
+      const h = setup();
+      const ui = { setStatus: h.setStatus, theme: {} };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("re-renders with the new theme after the theme changes", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: { fg: (style: string, text: string) => `A-${style}:${text}` },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toContain("A-success:bh");
+      ui.theme = { fg: (style: string, text: string) => `B-${style}:${text}` };
+      // No ledger change: only the idle poll re-renders.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.lastStatus()).toContain("B-success:bh");
+      expect(h.lastStatus()).not.toContain("A-success:bh");
+    });
+
+    it("falls back to plain status when a theme fg throws at call time", async () => {
+      // A bridge may wrap the host theme method-by-method, so acquiring `fg`
+      // succeeds while calling it still throws until the host is initialized.
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: {
+          fg: () => {
+            throw new Error("Theme not initialized. Call initTheme() first.");
+          },
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("does not throw from the idle timer when a theme fg throws at call time", async () => {
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: { fg: (style: string, text: string) => `S-${style}:${text}` },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      expect(h.lastStatus()).toContain("S-success:bh");
+      ui.theme = {
+        fg: () => {
+          throw new Error("Theme not initialized. Call initTheme() first.");
+        },
+      };
+      expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
+
+    it("restores colors after a call-time theme failure on an earlier render", async () => {
+      const h = setup();
+      let ready = false;
+      const theme = {
+        fg: (style: string, text: string) => {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return `${style}:${text}`;
+        },
+      };
+      await h.fire(
+        "session_start",
+        {},
+        { ...h.ctx, hasUI: true, ui: { setStatus: h.setStatus, theme } },
+      );
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+      ready = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.lastStatus()).toContain("success:bh");
+    });
+
+    it("records a call-time theme failure in the debug log", async () => {
+      vi.mocked(debugLog).mockClear();
+      const h = setup();
+      const ui = {
+        setStatus: h.setStatus,
+        theme: {
+          fg: () => {
+            throw new Error("Theme not initialized. Call initTheme() first.");
+          },
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      // The fallback must not hide an unrelated formatting failure (e.g. a
+      // misspelled style key) completely.
+      expect(debugLog).toHaveBeenCalledWith(
+        "statusBar.themeRenderFailed",
+        { error: expect.stringContaining("Theme not initialized") },
+        false,
+      );
+    });
+
+    it("picks up a theme initialized after session_start without a ledger change", async () => {
+      const h = setup();
+      let ready = false;
+      const theme = { fg: (style: string, text: string) => `${style}:${text}` };
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return theme;
+        },
+      };
+      await h.fire("session_start", {}, { ...h.ctx, hasUI: true, ui });
+      ready = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.lastStatus()).toContain("success:bh");
+    });
+
+    it("keeps the spinner timer safe without a theme", async () => {
+      const h = setup();
+      let ready = true;
+      const theme = { fg: (_style: string, text: string) => text };
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return theme;
+        },
+      };
+      const ctx = { ...h.ctx, hasUI: true, ui };
+      await h.fire("session_start", {}, ctx);
+      h.runtime.consolidationInFlight = true;
+      h.runtime.consolidationPhase = "observer";
+      await h.fire("agent_start", {}, ctx);
+      expect(h.lastStatus()).toContain("[observer]");
+      ready = false;
+      expect(() => vi.advanceTimersByTime(80)).not.toThrow();
+      expect(h.lastStatus()).toContain("⠙ [observer]");
+    });
+
+    it("keeps the settle timer safe without a theme", async () => {
+      const h = setup();
+      let ready = true;
+      const theme = { fg: (_style: string, text: string) => text };
+      const ui = {
+        setStatus: h.setStatus,
+        get theme() {
+          if (!ready) throw new Error("Theme not initialized. Call initTheme() first.");
+          return theme;
+        },
+      };
+      const ctx = { ...h.ctx, hasUI: true, ui };
+      await h.fire("session_start", {}, ctx);
+      await h.fire("session_compact", { reason: "manual" }, ctx);
+      expect(h.lastStatus()).toContain("[compact]");
+      ready = false;
+      expect(() => vi.advanceTimersByTime(5_000)).not.toThrow();
+      expect(h.lastStatus()).toBe("bh O▕░░░░░░░░▏  P▕░░░░░░░░▏  X▕░░░░░░░░▏");
+    });
   });
 
   describe("gauges", () => {

@@ -25,6 +25,7 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Runtime, ConsolidationPhase } from "./runtime.js";
+import type { SubagentContextLike } from "../core/subagent-detector.js";
 import {
   foldLedger,
   observationPoolTokens,
@@ -33,6 +34,7 @@ import {
   type Entry,
 } from "./ledger/index.js";
 import { autoCompactThreshold } from "./model-budget.js";
+import { debugLog } from "./debug-log.js";
 
 const STATUS_KEY = "blackhole";
 // Match pi's own working spinner (pi-tui Loader): 10 braille frames at 80 ms,
@@ -94,7 +96,17 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   let lastMemoryOn = true;
 
   function theme(): ThemeShim {
-    return ui?.theme ?? EMPTY_THEME;
+    try {
+      const t = ui?.theme;
+      // SDK/UI bridges may expose Pi's truthy theme proxy before initTheme().
+      // Probe fg inside the guard: merely reading ui.theme does not touch it.
+      // Bind the receiver here, but keep this call per-render (never hoist it)
+      // so a theme initialized later, or switched mid-session, is picked up.
+      return t ? { fg: t.fg.bind(t) } : EMPTY_THEME;
+    } catch {
+      // Optional footer colors must not take down a background agent's timer.
+      return EMPTY_THEME;
+    }
   }
 
   // ── rendering ──────────────────────────────────────────────────────────────
@@ -123,25 +135,15 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
   }
 
   /**
-   * Compose the footer and write it to ctx.ui.setStatus. Every render-time
-   * gate lives here so a config change (om-on/om-off, /blackhole settings)
-   * is picked up on the next tick without re-registering.
+   * Compose the footer string for one theme. Every theme call lives here, so a
+   * theme that throws while formatting takes down the composition, not the caller.
    */
-  function render(): void {
-    if (!ui) return; // no UI or ctx.hasUI === false — nothing to draw into
-    if (runtime.config.statusBar === false) {
-      clearStatus();
-      return;
-    }
-    if (!ui.setStatus) return;
-    const t = theme();
-    const cfg = runtime.config;
-    const threshold = autoCompactThreshold(cfg, model);
+  function composeFooter(t: ThemeShim, cfg: Runtime["config"], threshold: number): string {
     const segments: string[] = [];
     // O and P describe observational-memory work the consolidation pipeline
     // never launches while memory === false (it hard-returns first), so a
     // filling gauge would promise a note-taking pass that cannot run.
-    if (cfg.memory !== false) {
+    if (runtime.isMemoryEnabled(lastCtx as unknown as SubagentContextLike | undefined)) {
       segments.push(`${t.fg("muted", "O")}${gaugeBar(t, gauges.obsSince, cfg.observeAfterTokens)}`);
       segments.push(
         `${t.fg("muted", "P")}${gaugeBar(t, gauges.pool, cfg.observationsPoolMaxTokens)}`,
@@ -161,6 +163,34 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
       }
     }
     if (parts.length > 0) s += `  ${parts.join(" ")}`;
+    return s;
+  }
+
+  /**
+   * Compose the footer and write it to ctx.ui.setStatus. Every render-time
+   * gate lives here so a config change (om-on/om-off, /blackhole settings)
+   * is picked up on the next tick without re-registering.
+   */
+  function render(): void {
+    if (!ui) return; // no UI or ctx.hasUI === false — nothing to draw into
+    if (runtime.config.statusBar === false) {
+      clearStatus();
+      return;
+    }
+    if (!ui.setStatus) return;
+    const cfg = runtime.config;
+    const threshold = autoCompactThreshold(cfg, model);
+    let s: string;
+    try {
+      s = composeFooter(theme(), cfg, threshold);
+    } catch (error) {
+      // Colors are cosmetic: a theme that throws while formatting must not take
+      // down a background agent's timer. Recompose once in plain text; that pass
+      // is deliberately unguarded so a failure there still surfaces. An unknown
+      // style key also lands here, so record it instead of hiding it.
+      debugLog("statusBar.themeRenderFailed", { error: String(error) }, cfg.debugLog === true);
+      s = composeFooter(EMPTY_THEME, cfg, threshold);
+    }
     if (s === lastRendered) return;
     lastRendered = s;
     ui.setStatus(STATUS_KEY, s);
@@ -262,7 +292,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
     lastTailId = entries[entries.length - 1]?.id;
     lastInFlight = runtime.consolidationInFlight;
     lastPhase = runtime.consolidationPhase;
-    const memoryOn = runtime.config.memory !== false;
+    const memoryOn = runtime.isMemoryEnabled(ctx as unknown as SubagentContextLike);
     lastMemoryOn = memoryOn;
     // foldLedger also feeds syncWorkers (worker deltas), so it always runs;
     // the two O/P-only scans are skipped while memory is off, since nothing
@@ -294,7 +324,7 @@ export function registerStatusBar(pi: ExtensionAPI, runtime: Runtime): void {
       runtime.consolidationPhase === lastPhase &&
       // A memory flip changes which gauges are measured, so it forces a
       // recompute instead of a bare render (stale zeros otherwise).
-      (runtime.config.memory !== false) === lastMemoryOn
+      runtime.isMemoryEnabled(lastCtx as unknown as SubagentContextLike) === lastMemoryOn
     ) {
       try {
         const entries = branchOf(lastCtx);

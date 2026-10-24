@@ -11,6 +11,7 @@
  */
 import type { CacheRetention } from "@earendil-works/pi-ai";
 import { readBooleanEnv, readPositiveIntEnv } from "../pi-base/config.js";
+import { normalizeSubagentMemoryMode } from "./subagent-detector.js";
 
 export interface EnvParser {
   /** Env var name */
@@ -110,6 +111,10 @@ export function applyEnvOverrides<T extends object>(
 export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
   // Booleans
   memory: "PI_BLACKHOLE_MEMORY",
+  subagentMemory: {
+    var: "PI_BLACKHOLE_SUBAGENT_MEMORY",
+    parse: (raw: string) => normalizeSubagentMemoryMode(raw),
+  },
   debug: "PI_BLACKHOLE_DEBUG",
   debugLog: "PI_BLACKHOLE_DEBUG_LOG",
   sessionFallback: "PI_BLACKHOLE_SESSION_FALLBACK",
