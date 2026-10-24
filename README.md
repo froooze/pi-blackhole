@@ -46,14 +46,14 @@ Then `/reload` or restart Pi. The config file at `~/.pi/agent/pi-blackhole/pi-bl
 
 ## ✨ What's new
 
-> **Latest release: [0.5.15](CHANGELOG.md#0515---2026-10-18)**
+> **Latest release: [0.5.16](CHANGELOG.md#0516---2026-10-24)**
 >
+> - **Observational memory is off in subagent sessions by default** — detected children run no OM workers or OM injection while compaction is untouched. `subagentMemory: "inherit"` opts a child back in; detection is runner-agnostic, with `PI_BLACKHOLE_SUBAGENT_MARKERS` as the escape hatch for unsupported runners.
+> - **Large-session recall no longer holds hundreds of MiB** — sessions above 64 MiB are rescanned instead of cached, and retained source bytes are capped at 128 MiB with oldest-first eviction.
+> - **Extension loads on omp again** — the reflector schemas no longer read `.properties` back from a callable-typebox base at import time, so `omp plugin install` works with `reflectionSupersedes` both on and off.
 > - **Timeline and scheduled memory exports** — `/blackhole-export days:7 mode:timeline` produces a chronological rolling snapshot. Use `pi --no-session --blackhole-export "days:7 mode:timeline out:memory/weekly.md" -p` for scheduled exports; distilled export remains the default.
 > - **Keep unobserved original context** — opt into `tailBehavior: "unobserved"` to retain the raw history the observer has not completed. The default remains `"minimal"`; oversized protected tails defer compaction safely.
 > - **Optional context-pressure fallback** — `contextPressureFallback: "vcc"` can bridge older retained context while keeping a recent raw suffix. It is independent of tail policy and defaults to `"off"`.
-> - **Answers to question tools survive compaction** — best-effort recognition covers six inspected tool families, preserving confirmed choices and scoped user notes while excluding cancellation and timeout defaults.
-> - **Timestamped reflections and replacement tracking** — reflection evidence time is shown by default (`reflectionTimestamps: true`); opt into `reflectionSupersedes: true` to retire replaced reflections from active memory views.
-> - **Optional memory capture before leaving a session** — `observeOnShutdown: true` allows one bounded observer attempt before quit, new, resume or fork. It defaults to `false`.
 >
 > See [`CHANGELOG.md`](CHANGELOG.md) for detailed fixes and contribution history.
 

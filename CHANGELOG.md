@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [0.5.16] - 2026-10-24
+
 ### Added
 
 - **Observational memory is off in subagent sessions by default.** `subagentMemory` (`"off"` | `"inherit"`, default `"off"`; env `PI_BLACKHOLE_SUBAGENT_MEMORY`) skips OM workers and OM injection in detected children while leaving compaction untouched. Detection is centralized in `src/core/subagent-detector.ts`: known runner env markers, runner-owned session paths and custom entries, in-memory `fork`, and a generic ancestry marker (`PI_BLACKHOLE_ROOT_SESSIONS`) registered by each main session, which also covers in-process runners that expose no marker (including `kunkun9527/pi-subagents-lean`). Under `"off"`, an inherited `PI_BLACKHOLE_MEMORY=true` cannot re-enable a child; opt back in per child with `inherit`. `PI_BLACKHOLE_SUBAGENT_MARKERS` accepts extra env names for unsupported runners. A resumed session is treated as main unless a positive child signal is present, and the ancestry registry is pruned at session shutdown (reload excepted). Design, decision order and known blind spots: [`docs/subagent-detection.md`](docs/subagent-detection.md).
