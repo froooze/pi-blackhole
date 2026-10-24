@@ -137,7 +137,7 @@ Residual cases:
 
 - A new main session that emits an OM event *before* its own `session_start` has no registered id yet and can be seen as a child until the event arrives. Handled for `session_start` reasons; otherwise accepted.
 - A detached runner that builds a clean environment instead of inheriting it does not pass `PI_BLACKHOLE_ROOT_SESSIONS` down. It needs a Tier 1 marker (or the extra-markers escape hatch).
-- Detection happens at `session_start`, before the config file is read, so marker names cannot come from the file (see below).
+- Detection reads the environment and session evidence only; marker names cannot come from the config file (see below).
 
 ## Unsupported runners: `PI_BLACKHOLE_SUBAGENT_MARKERS`
 
@@ -155,15 +155,15 @@ Do not list a name the parent also sets; that is a false positive by constructio
 
 `PI_BLACKHOLE_SUBAGENT_MARKERS` is env-only today. A config-file equivalent (for example `subagentMarkers: string[]`) would help JSON-only users and Windows/PowerShell users who would rather not write shell-specific env syntax, and it is the same data in a second source. It is deferred, for three reasons:
 
-1. **Ordering.** Detection runs at `session_start` using `DEFAULTS`; `ensureConfig()` is called later by the consolidation path. Honouring a config key during detection means either loading config synchronously at `session_start` or re-evaluating the cached decision after config load — a behavior change of its own, not just a new field.
+1. **Ordering.** The original obstacle — config being read after the detection decision — is gone: the `session_start` handler loads config before `noteSessionStart`, so a config-file list could be read there. What remains is that `detectSubagentSession` is deliberately a pure probe over env plus session evidence; feeding it config would add a second input and a new precedence rule against the env list.
 2. **Scope.** The config file is shared by parent and child, and it is project/global rather than per-session. The list is therefore not a per-child signal, and a listed name that happens to be set in the parent becomes a false positive for the parent.
 3. **Surface.** A new key needs parsing, docs, example-config entry, precedence rules with the env list, and tests; the settings modal has no natural list widget.
 
-The env list is also already an integration escape hatch: users of an unsupported runner are configuring that runner's environment anyway, and the marker itself comes from that runner. If parity is added later, the intended shape is: `subagentMarkers: string[]` holding env **names**; union with `PI_BLACKHOLE_SUBAGENT_MARKERS` (deduped, not replaced); config loaded before `noteSessionStart`; JSON-only at first; empty/non-string entries dropped; and the same "the runner must still set the marker" caveat in the docs.
+The env list is also already an integration escape hatch: users of an unsupported runner are configuring that runner's environment anyway, and the marker itself comes from that runner. If parity is added later, the intended shape is: `subagentMarkers: string[]` holding env **names**; union with `PI_BLACKHOLE_SUBAGENT_MARKERS` (deduped, not replaced); JSON-only at first; empty/non-string entries dropped; and the same "the runner must still set the marker" caveat in the docs.
 
 ## Debugging
 
-With `debugLog: true`, a gated session writes one `subagent.memory_skipped` record containing the detection reason. Use it to answer "why is my child running OM?" (no record, so look at the reason table) and "why did my main session lose OM?" (a record with an unexpected reason, usually an ambient env var or a shared config).
+With `debugLog: true`, every session writes a `subagent.detect` record with the decision and reason, and a gated session writes one `subagent.memory_skipped` record containing the same reason. (`session_start` loads config before deciding, so `subagent.detect` appears in a fresh detached child too.) Use them to answer "why is my child running OM?" (no `memory_skipped`, so look at the reason tables) and "why did my main session lose OM?" (a record with an unexpected reason, usually an ambient env var or a shared config).
 
 Checklist:
 

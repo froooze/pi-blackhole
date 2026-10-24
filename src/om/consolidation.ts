@@ -645,10 +645,16 @@ function currentSessionIdentity(ctx: ConsolidationCtx): string | undefined {
 
 export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
   pi.on("session_start", (event, ctx) => {
-    runtime.startSession(currentSessionIdentity(ctx as ConsolidationCtx));
+    const sessionCtx = ctx as ConsolidationCtx;
+    // Load config before deciding: noteSessionStart logs only when
+    // config.debugLog is on, and a fresh host process reaches this handler
+    // before any other path has loaded config (the entrypoint's load is
+    // deferred behind a dynamic import).
+    runtime.ensureConfig(sessionCtx.cwd, (msg: string) => sessionCtx.ui?.notify?.(msg, "warning"));
+    runtime.startSession(currentSessionIdentity(sessionCtx));
     // Decide subagent-vs-main once per session and register main ancestry for
     // children spawned later. Gating itself stays per-event (see isMemoryEnabled).
-    runtime.noteSessionStart(ctx as unknown as SubagentContextLike, event);
+    runtime.noteSessionStart(sessionCtx as unknown as SubagentContextLike, event);
   });
   pi.on("session_shutdown", (event, ctx) => {
     // Start the observer first: it reads the per-session memory decision

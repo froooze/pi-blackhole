@@ -6,15 +6,27 @@
  * would turn memory off for the parent too.
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Runtime } from "../src/om/runtime.js";
 import { registerConsolidationTrigger } from "../src/om/consolidation.js";
 import { observeTailOnShutdown } from "../src/om/shutdown-observe.js";
+import { DEBUG_LOG_RELATIVE_PATH, flushDebugLog } from "../src/om/debug-log.js";
 import {
   ROOT_SESSIONS_ENV,
   readRootSessionIds,
   resetSubagentDetectorState,
 } from "../src/core/subagent-detector.js";
+
+// Config and debug log both resolve through getAgentDir(); point them at a
+// scratch dir so a fresh Runtime reads a real file instead of the user's.
+const scratch = vi.hoisted(() => ({ dir: "" }));
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@earendil-works/pi-coding-agent")>()),
+  getAgentDir: () => scratch.dir,
+}));
 
 interface CtxOptions {
   sessionFile?: string;
@@ -58,12 +70,20 @@ function makePi() {
   };
 }
 
+beforeEach(() => {
+  scratch.dir = mkdtempSync(join(tmpdir(), "pi-blackhole-gating-"));
+  delete process.env.PI_BLACKHOLE_DEBUG_LOG;
+});
+
 afterEach(() => {
   resetSubagentDetectorState();
   delete process.env[ROOT_SESSIONS_ENV];
   delete process.env.PI_SUBAGENT_CHILD;
   delete process.env.PI_SUBAGENT_DEPTH;
   delete process.env.PI_BLACKHOLE_MEMORY;
+  delete process.env.PI_BLACKHOLE_DEBUG_LOG;
+  flushDebugLog();
+  rmSync(scratch.dir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 
@@ -227,3 +247,48 @@ describe("shutdown observer wiring", () => {
     expect(runtime.captureGeneration).not.toHaveBeenCalled();
   });
 });
+
+describe("session_start detection logging", () => {
+  // A fresh host process delivers session_start before any other handler has
+  // loaded config, and noteSessionStart logs its decision only when
+  // config.debugLog is on. So the session_start path has to load config itself;
+  // no earlier ensureConfig is armed here.
+  it("writes subagent.detect when session_start runs before any other config load", () => {
+    writeConfigFile({ debugLog: true });
+    const runtime = new Runtime();
+    const { pi, fire } = makePi();
+    registerConsolidationTrigger(pi, runtime);
+
+    fire("session_start", { type: "session_start", reason: "startup" }, ctxFor("debug-parent"));
+
+    const detect = readDebugRecords().find((record) => record.event === "subagent.detect");
+    expect(detect?.data.sessionId).toBe("debug-parent");
+  });
+
+  it("writes no detect record when debugLog is off", () => {
+    writeConfigFile({ memory: true });
+    const runtime = new Runtime();
+    const { pi, fire } = makePi();
+    registerConsolidationTrigger(pi, runtime);
+
+    fire("session_start", { type: "session_start", reason: "startup" }, ctxFor("quiet-parent"));
+
+    expect(readDebugRecords().some((record) => record.event === "subagent.detect")).toBe(false);
+  });
+});
+
+function writeConfigFile(config: Record<string, unknown>): void {
+  const dir = join(scratch.dir, "pi-blackhole");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "pi-blackhole-config.json"), JSON.stringify(config));
+}
+
+function readDebugRecords(): Array<{ event: string; data: { sessionId?: string } }> {
+  flushDebugLog();
+  const path = join(scratch.dir, DEBUG_LOG_RELATIVE_PATH);
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as { event: string; data: { sessionId?: string } });
+}
