@@ -412,6 +412,8 @@ Controls observational memory in sessions detected as subagents. Compaction is u
 
 Detection is centralized in `src/core/subagent-detector.ts`: runner env markers (`PI_SUBAGENT_*`, `GENTLE_PI_AGENTS_*`), runner-owned session paths/custom entries, in-memory `fork`, and a generic ancestry marker (`PI_BLACKHOLE_ROOT_SESSIONS`) that every main session registers for its children. Unknown sessions are treated as main. `/resume` is ambiguous: a resumed session is treated as main unless a positive child signal is present. The ancestry registry is pruned at session shutdown (reload excepted) so a later main session in the same host is not mistaken for a child. For an unsupported runner, list extra env names in `PI_BLACKHOLE_SUBAGENT_MARKERS` (comma-separated).
 
+Full mechanism, decision order, known blind spots and debugging: [subagent-detection.md](subagent-detection.md).
+
 Precedence: `memory: false` still disables OM everywhere. Under `"off"`, a detected child stays off even if an inherited `PI_BLACKHOLE_MEMORY=true` resolved `memory` to true; to opt one child back in, set `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit` (or the config value) for that child. Set `PI_BLACKHOLE_SUBAGENT_MEMORY=off` to force the default when the file says `inherit`.
 
 ```jsonc
