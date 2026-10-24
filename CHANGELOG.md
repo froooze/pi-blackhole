@@ -2,6 +2,22 @@
 
 ---
 
+## [0.5.16] - 2026-10-24
+
+### Added
+
+- **Observational memory is off in subagent sessions by default.** `subagentMemory` (`"off"` | `"inherit"`, default `"off"`; env `PI_BLACKHOLE_SUBAGENT_MEMORY`) skips OM workers and OM injection in detected children while leaving compaction untouched. Detection is centralized in `src/core/subagent-detector.ts`: known runner env markers, runner-owned session paths and custom entries, in-memory `fork`, and a generic ancestry marker (`PI_BLACKHOLE_ROOT_SESSIONS`) registered by each main session, which also covers in-process runners that expose no marker (including `kunkun9527/pi-subagents-lean`). Under `"off"`, an inherited `PI_BLACKHOLE_MEMORY=true` cannot re-enable a child; opt back in per child with `inherit`. `PI_BLACKHOLE_SUBAGENT_MARKERS` accepts extra env names for unsupported runners. A resumed session is treated as main unless a positive child signal is present, and the ancestry registry is pruned at session shutdown (reload excepted). Design, decision order and known blind spots: [`docs/subagent-detection.md`](docs/subagent-detection.md).
+
+### Fixed
+
+- **Subagent detection is logged in a fresh child process.** The `subagent.detect` debug record is written only when `debugLog` is resolved, and a detached child delivers `session_start` before the entrypoint's deferred config load, so that record was silently dropped in exactly the process it was meant to explain. The `session_start` handler now loads config before deciding; gating behavior is unchanged.
+- **Recall no longer retains unbounded parses of large sessions.** The session-file cache held up to three complete parses of a JSONL regardless of file size, so distinct recall keys on a 222 MiB session could keep hundreds of MiB of heap alive ([#183](https://github.com/k0valik/pi-blackhole/issues/183)). A source file above 64 MiB is no longer cached (recall rescans it), total retained source bytes are capped at 128 MiB with oldest-first eviction, and expired entries are now released by an unref'ed timer instead of only on the next cache access. The 3-entry limit, 2-second TTL and mtime invalidation are unchanged.
+- **Extension loads on omp again.** 0.5.14 built the reflector's supersedes schema by reading `.properties` back from the base schema at import time. Hosts that shim `typebox` with callable schemas (oh-my-pi's omptype) have no `.properties`, so the extension failed to load and `omp plugin install` rejected it, even with `reflectionSupersedes` off; this second failure was reported in [#174](https://github.com/k0valik/pi-blackhole/issues/174). Both reflector schemas now compose from shared field definitions, and the schema pi sends is unchanged.
+- **`showPreCompactionMessage` works again after compaction.** The handler scanned the session path in the wrong direction, so the display-only copy was never appended and the last answer or approval question disappeared with the truncated history. It now finds the newest dropped assistant text; model context and retention are unchanged.
+- **Background agents survive an uninitialized status-bar theme.** A host UI bridge could expose a theme before it was ready, or one whose `fg` throws only when called, causing Blackhole's footer updates to throw `Theme not initialized. Call initTheme() first.` and terminate the worker from a timer. A render that cannot use the theme now falls back to plain text (recording the failure when `debugLog` is on) and resumes colors on the next render that succeeds.
+
+---
+
 ## [0.5.15] - 2026-10-18
 
 ### Fixed

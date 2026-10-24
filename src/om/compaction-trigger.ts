@@ -404,7 +404,7 @@ function handleAgentEnd(event: any, ctx: any, runtime: Runtime): void {
 
   dbg("compaction_trigger.agent_end", {
     passive: runtime.config.passive,
-    memory: runtime.config.memory,
+    memory: runtime.isMemoryEnabled(ctx),
     manualMode: runtime.config.compaction === "manual" || runtime.config.noAutoCompact === true,
     overrideDefaultCompaction: runtime.config.overrideDefaultCompaction,
     compactInFlight: runtime.compactInFlight,

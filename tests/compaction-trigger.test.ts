@@ -83,6 +83,8 @@ function captureHandler(
     ensureConfig: vi.fn(),
     resetInfoGate: vi.fn(),
     flushNoticeSummary: vi.fn(),
+    isMemoryEnabled: () => true,
+    noteSubagentMemorySkip: vi.fn(),
     // Passthrough: call ui.notify so tests can observe notification content
     tryEmitInfo: vi.fn((hasUI: boolean, ui: any, msg: string) => {
       if (!hasUI || !ui) return;

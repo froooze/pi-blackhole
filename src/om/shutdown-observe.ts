@@ -19,7 +19,10 @@ export async function observeTailOnShutdown(
     const config = runtime.config;
     if (!config.observeOnShutdown) return;
     if (!["quit", "new", "resume", "fork"].includes(reason)) return;
-    if (ctx.sessionManager.isPersisted?.() === false || config.memory === false) return;
+    if (ctx.sessionManager.isPersisted?.() === false || !runtime.isMemoryEnabled(ctx)) {
+      if (runtime.config.memory !== false) runtime.noteSubagentMemorySkip(ctx);
+      return;
+    }
     if (matchesSkippedProvider(config, ctx.model)) return;
     if (
       config.compaction === undefined &&

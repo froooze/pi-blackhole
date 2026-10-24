@@ -57,6 +57,8 @@ function captureFullSystem(config: PermutationConfig) {
     ensureConfig: vi.fn(),
     resetInfoGate: vi.fn(),
     flushNoticeSummary: vi.fn(),
+    isMemoryEnabled: () => true,
+    noteSubagentMemorySkip: vi.fn(),
     tryEmitInfo: vi.fn((hasUI: boolean, ui: any, msg: string) => {
       if (!hasUI || !ui) return;
       try {

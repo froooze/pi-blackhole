@@ -48,6 +48,8 @@ const createHarness = (
     compactWasPiVcc: false,
     compactionStats: null,
     appendFallbackNotified: false,
+    isMemoryEnabled: () => config.memory !== false,
+    noteSubagentMemorySkip: vi.fn(),
   };
   const pi = {
     on: (event: string, callback: (event: any, ctx: any) => any) => {

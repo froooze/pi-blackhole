@@ -242,7 +242,7 @@ The interaction matrix:
 
 Both `/blackhole` and auto-triggered default to `"minimal"`. Set explicitly to `"pi-default"` for a gentler cut.
 
-`showPreCompactionMessage` (default `true`) is the visual companion to the cut: after a successful blackhole compaction, blackhole appends a **display-only** copy of the newest assistant output the cut removed, so the terminal keeps showing the answer instead of jumping straight to the compaction card. It is a plain `custom` session entry — never sent to the model, never a memory source, and it leaves the cut, summary, and threshold untouched. Cap: 16 KiB, text only (no tool output, thinking, or images). Nothing is copied when the newest dropped text is already retained.
+`showPreCompactionMessage` (default `true`) is the visual companion to the cut: after a successful blackhole compaction, blackhole appends a **display-only** copy of the newest assistant output the cut removed, so the terminal keeps showing the answer instead of jumping straight to the compaction card. It is a plain `custom` session entry — never sent to the model, never a memory source, and it leaves the cut, summary, and threshold untouched. Cap: 16 KiB, text only (no tool output, thinking, or images). Retained answers are never copied: the newest answer the cut actually dropped is used instead, and nothing is copied when everything the cut hid is retained.
 
 **User-facing statement:**
 
@@ -283,6 +283,7 @@ Based on interview answers, build the config object. Write it to:
 
   // ── Memory ──
   "memory": true,                 // false = no workers, no memory injection
+  "subagentMemory": "off",        // "off" = no OM in detected subagents; "inherit" = follow memory
   "sessionFallback": true,        // false = skip worker when all configured models fail, don't use main model
   "reflectionTimestamps": true,  // Show reflection evidence time
   "reflectionSupersedes": false, // Replacement notes; replaced reflections leave compaction output
@@ -548,6 +549,10 @@ These override config file values at load time, applied AFTER config is parsed. 
 | `PI_BLACKHOLE_COMPACTION` | Overrides `compaction` | `auto`, `manual`, `off` |
 | `PI_BLACKHOLE_COMPACTION_ENGINE` | Overrides `compactionEngine` | `blackhole`, `pi-default` |
 | `PI_BLACKHOLE_CACHE_RETENTION` | Overrides `cacheRetention` (worker prompt cache) | `none`, `short`, `long` |
+| `PI_BLACKHOLE_SUBAGENT_MEMORY` | Overrides `subagentMemory` | `off`, `inherit` |
+| `PI_BLACKHOLE_SUBAGENT_MARKERS` | Extra env names that mark a session as a subagent | comma-separated names |
+
+`subagentMemory` defaults to `"off"`: OM workers and OM injection are skipped in detected subagent sessions, while compaction is unaffected. Under `"off"`, an inherited `PI_BLACKHOLE_MEMORY=true` does not re-enable children; use `PI_BLACKHOLE_SUBAGENT_MEMORY=inherit` for a per-child opt-in. `memory: false` still disables OM everywhere. A resumed session is treated as main unless a positive child signal is present, and the ancestry registry is pruned at session shutdown (reload excepted).
 
 Legacy aliases (still work): `PI_VCC_OM_PASSIVE`, `PI_OBSERVATIONAL_MEMORY_PASSIVE`.
 
